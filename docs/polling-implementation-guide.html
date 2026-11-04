@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>범위 청크 + 리스 병렬 폴링 구현 가이드</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: 넓은 화면은 왼쪽 고정 목차 + 오른쪽 본문(약 70ch), 좁은 화면은 목차가 위로 접혀 올라가는 개발자용 레퍼런스.
+   상태는 칩, 위험/필수조건은 왼쪽 띠, 코드는 복사 버튼이 붙은 블록으로 일관 표현한다. */
+:root {
+  --bg: #f3f5f6;
+  --surface: #ffffff;
+  --ink: #18242c;
+  --muted: #5b6b74;
+  --line: #d5dde1;
+  --accent: #1d5f86;
+  --accent-soft: #e2edf4;
+  --code-bg: #f6f8f9;
+  --warn: #9a5800; --warn-bg: #fcf0dc;
+  --ok: #1d7444;   --ok-bg: #e1f2e7;
+  --bad: #b02a22;  --bad-bg: #fbe4e2;
+  --idle: #5f6f78; --idle-bg: #e9eef0;
+  --font-display: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --font-body: "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1518; --surface: #162026; --ink: #e2e9ec; --muted: #94a5ae; --line: #2a3940;
+    --accent: #6cb6e0; --accent-soft: #163042; --code-bg: #111a1f;
+    --warn: #f0b45c; --warn-bg: #39290f; --ok: #6fd39a; --ok-bg: #12301f;
+    --bad: #f2857c; --bad-bg: #3a1917; --idle: #a6b4bb; --idle-bg: #233037;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1518; --surface: #162026; --ink: #e2e9ec; --muted: #94a5ae; --line: #2a3940;
+  --accent: #6cb6e0; --accent-soft: #163042; --code-bg: #111a1f;
+  --warn: #f0b45c; --warn-bg: #39290f; --ok: #6fd39a; --ok-bg: #12301f;
+  --bad: #f2857c; --bad-bg: #3a1917; --idle: #a6b4bb; --idle-bg: #233037;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 16px; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.75;
+  word-break: keep-all; overflow-wrap: anywhere;
+}
+.shell { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 32px; max-width: 1240px; margin: 0 auto; padding: 32px 20px 80px; }
+@media (max-width: 1000px) { .shell { grid-template-columns: 1fr; gap: 20px; } }
+
+nav.toc { position: sticky; top: 20px; align-self: start; max-height: calc(100vh - 40px); overflow-y: auto; font-size: 14px; }
+@media (max-width: 1000px) { nav.toc { position: static; max-height: none; } }
+nav.toc .box { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 14px; }
+nav.toc .label { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin: 0 0 8px 6px; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+nav.toc a { display: grid; grid-template-columns: 28px 1fr; padding: 5px 6px; border-radius: 6px; color: var(--ink); text-decoration: none; }
+nav.toc a span { font-family: var(--font-mono); color: var(--accent); font-size: 12.5px; padding-top: 1px; }
+nav.toc a:hover { background: var(--accent-soft); }
+
+main { display: grid; gap: 24px; min-width: 0; }
+header.top { display: grid; gap: 10px; }
+.kicker { font-family: var(--font-mono); font-size: 13px; color: var(--accent); }
+h1, h2, h3, h4 { font-family: var(--font-display); text-wrap: balance; line-height: 1.35; margin: 0; }
+h1 { font-size: clamp(27px, 4vw, 38px); }
+h2 { font-size: 23px; display: flex; gap: 12px; align-items: baseline; }
+h2 .num { font-family: var(--font-mono); font-size: 15px; color: var(--accent); }
+h3 { font-size: 18px; margin-top: 6px; }
+h4 { font-size: 15.5px; }
+p { margin: 0; max-width: 72ch; }
+.lead { font-size: 17px; color: var(--muted); max-width: 72ch; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+.meta span { background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 2px 12px; color: var(--muted); }
+
+section.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 28px clamp(18px, 3.5vw, 34px); display: grid; gap: 16px; min-width: 0; }
+.stack { display: grid; gap: 10px; }
+ul.plain, ol.plain { margin: 0; padding-left: 22px; display: grid; gap: 4px; max-width: 72ch; }
+
+code { font-family: var(--font-mono); font-size: .86em; background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+.codewrap { position: relative; min-width: 0; }
+.codewrap .cap { font-family: var(--font-mono); font-size: 12px; color: var(--muted); padding: 6px 12px; border: 1px solid var(--line); border-bottom: none; border-radius: 10px 10px 0 0; background: var(--bg); display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+pre { margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 0 0 10px 10px; padding: 14px 16px; overflow-x: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.6; word-break: normal; overflow-wrap: normal; white-space: pre; }
+pre code { background: none; border: none; padding: 0; font-size: inherit; }
+button.copy { font-family: var(--font-body); font-size: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 1px 10px; cursor: pointer; }
+button.copy:hover { border-color: var(--accent); color: var(--accent); }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { background: var(--bg); color: var(--muted); font-size: 12.5px; font-weight: 700; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td.mono, .mono { font-family: var(--font-mono); font-size: 12.5px; }
+td.ty { font-family: var(--font-mono); font-size: 12.5px; color: var(--accent); white-space: nowrap; }
+td.nn { text-align: center; white-space: nowrap; }
+td.key { white-space: nowrap; }
+table.ldm td:first-child { font-weight: 700; white-space: nowrap; }
+
+.tblhead { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; }
+.tblhead .phys { font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+
+.chip { display: inline-block; font-size: 12px; font-weight: 700; padding: 1px 9px; border-radius: 999px; white-space: nowrap; line-height: 1.7; }
+.chip.ok { color: var(--ok); background: var(--ok-bg); }
+.chip.warn { color: var(--warn); background: var(--warn-bg); }
+.chip.bad { color: var(--bad); background: var(--bad-bg); }
+.chip.idle { color: var(--idle); background: var(--idle-bg); }
+.chip.acc { color: var(--accent); background: var(--accent-soft); }
+
+.callout { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 14px 18px; border-radius: 0 10px 10px 0; display: grid; gap: 6px; }
+.callout.warn { border-color: var(--warn); background: var(--warn-bg); }
+.callout.bad { border-color: var(--bad); background: var(--bad-bg); }
+.callout b.t { font-family: var(--font-display); }
+
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 760px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+.tile { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 6px; align-content: start; }
+.tile .h { font-family: var(--font-display); font-weight: 700; }
+.tile p { font-size: 14.5px; color: var(--muted); }
+
+.inv { display: grid; gap: 10px; counter-reset: inv; }
+.inv > div { display: grid; grid-template-columns: 44px 1fr; gap: 12px; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.inv > div::before { counter-increment: inv; content: "I" counter(inv); font-family: var(--font-mono); font-weight: 600; color: var(--accent); }
+
+.figure { border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; background: var(--bg); }
+.figure svg { display: block; min-width: 700px; width: 100%; height: auto; }
+svg text { font-family: var(--font-body); }
+.fig-cap { font-size: 13px; color: var(--muted); }
+
+ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; counter-reset: s; }
+ol.steps > li { counter-increment: s; display: grid; grid-template-columns: 30px 1fr; gap: 10px; }
+ol.steps > li::before { content: counter(s); width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--surface); display: grid; place-items: center; font-family: var(--font-mono); font-size: 13px; font-weight: 600; margin-top: 1px; }
+
+.check { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.check li { display: grid; grid-template-columns: 22px 1fr; gap: 8px; }
+.check li::before { content: ""; width: 14px; height: 14px; border: 2px solid var(--accent); border-radius: 3px; margin-top: 5px; }
+
+footer { font-size: 13px; color: var(--muted); }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="shell">
+
+<nav class="toc" aria-label="목차">
+  <div class="box">
+    <div class="label">목차</div>
+    <ol>
+      <li><a href="#overview"><span>01</span>개요와 보장 범위</a></li>
+      <li><a href="#prereq"><span>02</span>온보딩 필수조건</a></li>
+      <li><a href="#arch"><span>03</span>구성요소</a></li>
+      <li><a href="#principles"><span>04</span>작동 원리</a></li>
+      <li><a href="#tables"><span>05</span>논리 테이블 설계</a></li>
+      <li><a href="#ddl"><span>06</span>물리 DDL</a></li>
+      <li><a href="#states"><span>07</span>상태 전이</a></li>
+      <li><a href="#flows"><span>08</span>처리 흐름과 SQL</a></li>
+      <li><a href="#impl"><span>09</span>Spring · MyBatis 구현</a></li>
+      <li><a href="#config"><span>10</span>설정값 가이드</a></li>
+      <li><a href="#ops"><span>11</span>모니터링 · 운영</a></li>
+      <li><a href="#tests"><span>12</span>테스트 시나리오</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+
+<header class="top">
+  <div class="kicker">구현 가이드 v3 · Read-Only 소스 테이블 · 다중 pod</div>
+  <h1>범위 청크 + 리스 기반 병렬 폴링 구현 가이드</h1>
+  <p class="lead">읽기 복제본에 있는 append-only 소스 테이블을 겹치지 않는 <b>범위 청크</b>로 나누고, EKS 다중 pod의 워커가 청크를 <b>리스</b>(기한 있는 대여)로 가져가 준실시간으로 처리합니다. 결과는 앱 DB의 멱등 테이블과 아웃박스에 정확히 한 번 반영합니다.</p>
+  <div class="meta"><span>PostgreSQL 17+ 권장</span><span>Spring Boot 3.x</span><span>MyBatis 3.5.12+</span><span>EKS 다중 pod</span><span>작성 2026-11-04</span></div>
+</header>
+
+<!-- 01 -->
+<section class="card" id="overview" aria-labelledby="h-overview">
+  <h2 id="h-overview"><span class="num">01</span>개요와 보장 범위</h2>
+  <h3>핵심 메커니즘: 범위 청크 + 리스</h3>
+  <p>이 설계의 모든 정합성과 동시성은 아래 세 장치에서 나옵니다. 나머지 구성요소(Reaper, Sweep 등)는 이 장치가 계속 돌도록 지키는 보조 역할입니다.</p>
+  <div class="grid3">
+    <div class="tile"><div class="h">① 범위 청크</div><p>커서 키 <code>(created_at, pk…)</code> 공간을 겹치지 않는 <code>(시작, 종료]</code> 구간으로 자릅니다. Planner가 CAS로 계획HWM을 한 칸씩 전진시키므로 구간 사이에 겹침과 빈틈이 없습니다. → 중복 조회 없음, 읽기 증폭 없음</p></div>
+    <div class="tile"><div class="h">② 리스</div><p>워커는 <code>SKIP LOCKED</code>로 청크 하나를 기한을 정해 가져갑니다. pod가 죽으면 기한이 지난 청크를 다른 워커가 다시 가져갑니다. → pod 수와 무관하게 확장, 장애 자동 복구</p></div>
+    <div class="tile"><div class="h">③ fencing 완료</div><p>claim할 때마다 리스토큰이 증가합니다. 멱등·아웃박스 기록과 토큰 조건의 DONE 갱신을 한 트랜잭션으로 묶어, 토큰이 바뀌었으면 전부 롤백합니다. → 좀비 워커가 있어도 정확히 한 번</p></div>
+  </div>
+  <p>원리는 04장, 테이블은 05장, SQL은 08장에서 자세히 다룹니다.</p>
+  <h3>입력 · 출력 · 목표</h3>
+  <div class="grid3">
+    <div class="tile"><div class="h">입력</div><p>읽기 복제본(PostgreSQL 물리 복제)에 있는 append-only 소스 테이블 N개. PK는 대부분 varchar 복합키.</p></div>
+    <div class="tile"><div class="h">출력</div><p>앱 DB의 멱등 테이블과 아웃박스(기존 구현). Kafka 발행은 기존 아웃박스 릴레이가 담당.</p></div>
+    <div class="tile"><div class="h">목표 지연</div><p>소스 커밋부터 아웃박스 기록까지 대략 safety lag + 2~3초.</p></div>
+  </div>
+  <h3>이 설계가 보장하는 것</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>항목</th><th>보장 수준</th><th>근거</th></tr></thead>
+      <tbody>
+        <tr><td>중복 반영</td><td><span class="chip ok">없음</span> 정확히 한 번의 효과</td><td>리스 토큰 fencing과 멱등 테이블 unique 제약을 같은 앱 DB 트랜잭션 안에서 적용</td></tr>
+        <tr><td>정상 경로의 누락</td><td><span class="chip ok">없음</span> 단, 필수조건을 지켜야 함</td><td>복제본 재생 시각 기반 안전 상한선과 소스 쓰기 트랜잭션 시간 상한 강제(02장)</td></tr>
+        <tr><td>필수조건 위반 시 누락</td><td><span class="chip warn">탐지 후 복구</span></td><td>근거리·일일 sweep이 누락 키를 찾아 재처리 요청을 만들고 알람을 보냄</td></tr>
+        <tr><td>pod 장애</td><td><span class="chip ok">자동 복구</span></td><td>리스가 만료되면 다른 워커가 재claim. 시도 횟수를 다 쓰면 <code>DEAD</code>로 전이하고 알람</td></tr>
+        <tr><td>소스 읽기</td><td><span class="chip idle">최소 한 번</span></td><td>재시도하면 같은 범위를 다시 읽음. append-only라 결과가 같음</td></tr>
+        <tr><td>순서</td><td><span class="chip idle">보장 안 함</span></td><td>청크끼리는 병렬로 처리됨. 키 단위 순서는 Kafka 파티션 키로 컨슈머 쪽에서 보장</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 02 -->
+<section class="card" id="prereq" aria-labelledby="h-prereq">
+  <h2 id="h-prereq"><span class="num">02</span>온보딩 필수조건</h2>
+  <p>소스 테이블 하나를 폴링 대상으로 추가하려면 아래 조건을 <b>모두</b> 만족해야 합니다. 하나라도 지킬 수 없는 테이블은 폴링 방식으로 누락 없음을 보장할 수 없으므로, CDC(논리 복제) 대상으로 분류합니다.</p>
+  <div class="callout warn"><b class="t">가장 중요한 조건: 쓰기 트랜잭션 시간 상한</b>
+    <p><code>created_at = now()</code>는 커밋 시각이 아니라 <b>트랜잭션 시작 시각</b>입니다. 시작한 지 오래된 트랜잭션이 늦게 커밋되면, 그 행은 커서가 이미 지나간 자리에 나타나 영구 누락됩니다. 그래서 primary 쓰기 트랜잭션의 최대 길이 B를 강제하고 <code>safety_lag &gt; B + 여유</code>로 설정해야 합니다.</p>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>조건</th><th>확인 방법</th><th>담당</th></tr></thead>
+      <tbody>
+        <tr><td>P1</td><td>append-only: INSERT만 있고 커서 컬럼은 INSERT 후 바뀌지 않음</td><td>소스팀 확인, 권한 점검</td><td>소스팀</td></tr>
+        <tr><td>P2</td><td>단조 증가 시각 컬럼(예: <code>created_at</code>)이 <code>NOT NULL</code>이고 DB <code>DEFAULT now()</code>로 채워짐. 앱이 값을 넣는다면 backdating 허용폭까지 B에 포함</td><td><code>pg_attribute.attnotnull</code>, 컬럼 기본값 확인</td><td>소스팀</td></tr>
+        <tr><td>P3</td><td>쓰기 트랜잭션 시간 상한 B를 강제: PG17+ <code>transaction_timeout</code>, 또는 앱·프록시 수준에서 강제. writer가 세션에서 <code>SET transaction_timeout=0</code>으로 우회하지 못하게 막아야 함</td><td>writer 코드·프록시 정책 검토, <code>pg_stat_activity.xact_start</code> 감시 알람</td><td>소스팀·DBA</td></tr>
+        <tr><td>P4</td><td>2PC(prepared transaction) 금지: <code>max_prepared_transactions = 0</code>. 2PC 트랜잭션에는 <code>transaction_timeout</code>이 적용되지 않음</td><td><code>SHOW max_prepared_transactions</code></td><td>DBA</td></tr>
+        <tr><td>P5</td><td>primary에 커서 인덱스 <code>(created_at, pk1, …, pkn)</code>를 B-tree, 전부 ASC, partial이나 expression 없이 생성. 복제본에는 따로 인덱스를 만들 수 없음</td><td>기동 시 카탈로그 검증 SQL(09장), <code>EXPLAIN</code>에서 <code>Index Cond</code>가 쓰이고 Sort가 없는지 확인</td><td>소스팀</td></tr>
+        <tr><td>P6</td><td>인덱스 컬럼의 collation이 결정적(deterministic)이고, 쿼리 collation과 정확히 같으며, collation 버전이 일치. 새 인덱스라면 <code>COLLATE "C"</code> 권장</td><td>카탈로그 검증 SQL의 <code>collisdeterministic</code>, <code>collation_version_ok</code></td><td>개발</td></tr>
+        <tr><td>P7</td><td>커서 컬럼 타입이 허용 목록 안에 있음: <code>timestamptz</code>, <code>timestamp</code>, <code>varchar</code>, <code>text</code>, <code>int4</code>, <code>int8</code>, <code>uuid</code></td><td>기동 검증</td><td>개발</td></tr>
+        <tr><td>P8</td><td>폴링 계정은 복제본 읽기 전용 role. <code>pg_last_xact_replay_timestamp()</code>를 실행할 수 있어야 함</td><td>접속 테스트</td><td>DBA</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 03 -->
+<section class="card" id="arch" aria-labelledby="h-arch">
+  <h2 id="h-arch"><span class="num">03</span>구성요소</h2>
+  <div class="figure">
+    <svg viewBox="0 0 900 330" role="img" aria-label="구성도: 복제본 소스 테이블을 pod 안의 Planner, Worker, Reaper, Sweep이 읽고, 앱 DB의 조율 테이블과 멱등, 아웃박스에 기록하며, 아웃박스 릴레이가 Kafka로 발행한다">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+      </defs>
+      <rect x="10" y="40" width="190" height="250" rx="12" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="105" y="68" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">소스 DB 복제본</text>
+      <text x="105" y="88" text-anchor="middle" font-size="12" fill="var(--muted)">읽기 전용 · 물리 복제</text>
+      <rect x="30" y="110" width="150" height="56" rx="8" fill="var(--accent-soft)"/>
+      <text x="105" y="134" text-anchor="middle" font-size="13" fill="var(--ink)">소스 테이블 N개</text>
+      <text x="105" y="153" text-anchor="middle" font-size="11.5" fill="var(--muted)">append-only</text>
+      <rect x="30" y="180" width="150" height="56" rx="8" fill="var(--accent-soft)"/>
+      <text x="105" y="204" text-anchor="middle" font-size="13" fill="var(--ink)">커서 인덱스</text>
+      <text x="105" y="223" text-anchor="middle" font-size="11.5" fill="var(--muted)">(created_at, pk…)</text>
+
+      <rect x="290" y="20" width="290" height="290" rx="12" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="435" y="46" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">폴러 pod × M (EKS)</text>
+      <rect x="310" y="62" width="250" height="50" rx="8" fill="var(--bg)" stroke="var(--line)"/>
+      <text x="325" y="83" font-size="13" font-weight="700" fill="var(--ink)">Planner</text>
+      <text x="325" y="101" font-size="11.5" fill="var(--muted)">청크 자르기 · CAS로 HWM 전진</text>
+      <rect x="310" y="120" width="250" height="50" rx="8" fill="var(--bg)" stroke="var(--line)"/>
+      <text x="325" y="141" font-size="13" font-weight="700" fill="var(--ink)">Worker × k</text>
+      <text x="325" y="159" font-size="11.5" fill="var(--muted)">claim · 범위 조회 · 완료 TX · heartbeat</text>
+      <rect x="310" y="178" width="250" height="50" rx="8" fill="var(--bg)" stroke="var(--line)"/>
+      <text x="325" y="199" font-size="13" font-weight="700" fill="var(--ink)">Reaper</text>
+      <text x="325" y="217" font-size="11.5" fill="var(--muted)">DEAD 전이 · 완료HWM 갱신 · 이력 이관</text>
+      <rect x="310" y="236" width="250" height="50" rx="8" fill="var(--bg)" stroke="var(--line)"/>
+      <text x="325" y="257" font-size="13" font-weight="700" fill="var(--ink)">Sweep · Replay</text>
+      <text x="325" y="275" font-size="11.5" fill="var(--muted)">누락 탐지 · 정확 키 재처리</text>
+
+      <rect x="670" y="20" width="220" height="230" rx="12" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="780" y="46" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">앱 DB</text>
+      <text x="688" y="76" font-size="12.5" fill="var(--ink)">폴링소스 · 소스커서컬럼</text>
+      <text x="688" y="100" font-size="12.5" fill="var(--ink)">폴링청크 · 폴링청크이력</text>
+      <text x="688" y="124" font-size="12.5" fill="var(--ink)">스윕실행 · 재처리요청</text>
+      <line x1="688" y1="140" x2="872" y2="140" stroke="var(--line)"/>
+      <text x="688" y="164" font-size="12.5" fill="var(--ink)">멱등 (기존)</text>
+      <text x="688" y="188" font-size="12.5" fill="var(--ink)">아웃박스 (기존)</text>
+      <text x="688" y="230" font-size="11.5" fill="var(--muted)">완료 = 단일 트랜잭션</text>
+
+      <rect x="700" y="272" width="160" height="44" rx="8" fill="var(--accent-soft)"/>
+      <text x="780" y="299" text-anchor="middle" font-size="13" fill="var(--ink)">릴레이 → Kafka</text>
+
+      <line x1="290" y1="140" x2="205" y2="140" stroke="var(--accent)" stroke-width="2" marker-end="url(#ah)"/>
+      <text x="247" y="130" text-anchor="middle" font-size="11.5" fill="var(--muted)">읽기</text>
+      <line x1="580" y1="140" x2="665" y2="140" stroke="var(--accent)" stroke-width="2" marker-end="url(#ah)"/>
+      <text x="622" y="130" text-anchor="middle" font-size="11.5" fill="var(--muted)">쓰기</text>
+      <line x1="780" y1="250" x2="780" y2="268" stroke="var(--accent)" stroke-width="2" marker-end="url(#ah)"/>
+    </svg>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>구성요소</th><th>실행 위치·주기</th><th>역할</th><th>동시 실행</th></tr></thead>
+      <tbody>
+        <tr><td><b>Planner</b></td><td>모든 pod, 소스마다 1초 간격</td><td>복제본에서 다음 청크 경계를 찾고 <code>폴링청크</code>를 등록. HWM은 CAS로 전진</td><td>여러 pod가 시도해도 CAS 승자 하나만 반영. 리스는 중복 조회를 줄이는 최적화</td></tr>
+        <tr><td><b>Worker</b></td><td>pod마다 k개 스레드, 빈 claim이면 100ms~1s 백오프</td><td>청크 claim → 복제본 범위 조회 → 앱 DB 완료 트랜잭션</td><td><code>SKIP LOCKED</code>로 서로 다른 청크를 가져감</td></tr>
+        <tr><td><b>Heartbeat</b></td><td>Worker마다 리스 시간의 1/3 간격</td><td>리스 연장. 실패하면 처리를 즉시 중단</td><td>자기 토큰으로만 갱신</td></tr>
+        <tr><td><b>Reaper</b></td><td>모든 pod, 10초 간격</td><td>시도 횟수를 다 쓴 청크를 <code>DEAD</code>로 전이하고 소스를 일시정지. 완료HWM 갱신, 완료 청크를 이력으로 이관</td><td>멱등 SQL과 <code>SKIP LOCKED</code>로 중복 실행에 안전</td></tr>
+        <tr><td><b>Sweep</b></td><td>근거리 1분, 일일 1회, 전체는 수동</td><td>완료HWM 이하에서 멱등 테이블에 없는 키를 찾아 <code>재처리요청</code> 생성</td><td><code>스윕실행</code> 리스로 소스·유형마다 하나만</td></tr>
+        <tr><td><b>Replay</b></td><td>모든 pod</td><td>재처리 요청 키를 정확 키로 조회해 같은 완료 경로로 반영</td><td><code>SKIP LOCKED</code> 사용</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 04 -->
+<section class="card" id="principles" aria-labelledby="h-principles">
+  <h2 id="h-principles"><span class="num">04</span>작동 원리</h2>
+
+  <h3>4.1 커서 키: <code>(created_at, pk1, …, pkn)</code></h3>
+  <div class="stack">
+    <p>varchar PK는 삽입 순서와 무관한 위치에 새 행이 들어갑니다. 그래서 PK만으로 만든 커서(<code>pk &gt; cursor</code>)는 새 행을 놓칩니다. 이 설계는 단조 증가하는 <code>created_at</code>을 맨 앞에 두고, PK는 같은 시각의 행들 사이 순서를 정하는 데만 씁니다.</p>
+    <p>PostgreSQL의 row 비교 <code>(a, b, c) &gt; (x, y, z)</code>는 왼쪽부터 사전식으로 비교하고, 같은 순서의 B-tree 인덱스를 <code>Index Cond</code>로 사용합니다. 커서 튜플 전체가 유일하므로 <code>(from, to]</code> 구간은 서로 겹치지 않습니다. 한 트랜잭션에서 수천 행을 일괄 INSERT해 <code>created_at</code>이 모두 같아도 PK 순서로 정확히 나뉩니다.</p>
+  </div>
+
+  <h3>4.2 안전 상한선 <code>safe_ts</code></h3>
+  <div class="codewrap"><div class="cap"><span>정의</span></div><pre><code>safe_ts   = pg_last_xact_replay_timestamp() − safety_lag     (복제본에서 계산)
+조건      : safety_lag ≥ B + 여유      (B = primary 쓰기 TX 최대 길이, 02장 P3)
+청크 대상 : created_at &lt; safe_ts 인 행만</code></pre></div>
+  <div class="stack">
+    <p><b>이 조건이 누락을 막는 이유</b>는 다음과 같습니다.</p>
+    <ol class="plain">
+      <li>어떤 행의 <code>created_at = c</code>는 그 행을 쓴 트랜잭션 T의 시작 시각입니다. 필수조건 P3에 따라 T의 커밋 시각은 <code>c + B</code>보다 이릅니다.</li>
+      <li><code>c &lt; safe_ts = replay_ts − lag</code>이고 <code>lag ≥ B</code>이므로, T의 커밋 시각은 <code>replay_ts</code>보다 이릅니다.</li>
+      <li>물리 복제본은 WAL을 커밋 순서대로 재생합니다. <code>replay_ts</code>는 이미 재생된 마지막 커밋의 primary 시각이므로, 그보다 먼저 커밋된 T도 이미 재생되어 <b>보이는 상태</b>입니다.</li>
+      <li>따라서 <code>created_at &lt; safe_ts</code>인 행은 조회 시점에 모두 보이고, 이후에 새로 나타나지 않습니다. 커서가 지나간 자리는 다시 채워지지 않습니다.</li>
+    </ol>
+    <p>WAL 안에서 커밋 타임스탬프가 아주 미세하게 역전되는 현상과 primary 시계 보정은 "여유"로 흡수합니다. 복제 지연이 생기면 <code>replay_ts</code>도 같이 늦어지므로 결과는 늘 보수적입니다. primary에 커밋이 없는 유휴 상태에서는 <code>replay_ts</code>가 멈춰 청크화도 멈춥니다. 이는 정확성을 위해 의도한 동작이고, 실시간 유입이 있으면 문제가 되지 않습니다.</p>
+  </div>
+  <div class="callout bad"><b class="t">쓰면 안 되는 보완책</b><p><code>pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()</code>일 때 복제본의 <code>now()</code>를 기준으로 쓰는 방법은 <b>금지</b>합니다. 받은 WAL을 모두 재생했다는 뜻일 뿐, primary에 오래 열려 있는 트랜잭션이 없다는 보장이 아닙니다. <code>hot_standby_feedback</code>도 가시성 갭과는 관계없는 설정입니다.</p></div>
+
+  <h3>4.3 청크와 Planner CAS</h3>
+  <div class="stack">
+    <p>Planner는 <code>계획HWM</code>(마지막으로 잘린 커서 키) 다음부터 <code>safe_ts</code> 미만 범위에서 커서 순서로 최대 <code>청크크기</code>개 행을 세고, 마지막 행의 커서 키를 다음 경계로 정합니다. 경계값은 복제본에서 <code>col::text</code>로 받아 <code>text[]</code> 그대로 저장합니다. 애플리케이션은 이 값을 해석하거나 비교하지 않습니다.</p>
+    <p>정확성은 오직 <b>CAS</b>로 보장합니다. 앱 DB의 짧은 트랜잭션 하나에서 <code>계획HWM = 조회 전에 읽은 값</code>을 조건으로 HWM을 새 경계로 바꾸고, 같은 트랜잭션에서 청크를 INSERT합니다. 여러 pod가 같은 HWM에서 동시에 조회해도 CAS 승자 하나만 커밋하고, 진 쪽은 결과를 버립니다. 그래서 겹치거나 건너뛰는 구간이 생기지 않습니다. Planner 리스(소유자, 만료일시)는 중복 조회를 줄이는 최적화일 뿐입니다.</p>
+    <p>복제본 조회는 앱 DB 트랜잭션 <b>밖에서</b> 실행합니다. 이렇게 하면 앱 DB 커넥션과 행 잠금을 복제본 I/O 동안 붙잡지 않습니다.</p>
+  </div>
+
+  <h3>4.4 claim · 리스 · fencing</h3>
+  <div class="stack">
+    <p>Worker는 <code>FOR UPDATE SKIP LOCKED</code>로 <code>READY</code> 청크나 리스가 만료된 <code>CLAIMED</code> 청크 하나를 잠그고, 같은 문장에서 <code>리스토큰 + 1</code>, 소유자, 만료일시, <code>시도횟수 + 1</code>을 기록한 뒤 바로 커밋합니다. READ COMMITTED에서 경합이 생기면 PostgreSQL이 최신 행 버전으로 조건을 다시 평가(EvalPlanQual)합니다. 잠긴 행은 건너뛰므로 두 워커가 같은 청크를 가져가는 일이 없습니다.</p>
+    <p>완료 트랜잭션은 <b>[멱등 INSERT → 신규분만 아웃박스 INSERT → <code>WHERE 리스토큰 = 내 토큰 AND 상태 = 'CLAIMED'</code> 조건의 DONE 갱신]</b>을 하나로 묶습니다. 마지막 UPDATE가 0행이면 예외를 던져 전체를 롤백합니다. 리스가 만료되어 다른 워커가 재claim한 경우, 늦게 깨어난 워커(좀비)의 기록은 이렇게 남지 않습니다. 동시에 같은 키를 INSERT하는 경우는 멱등 테이블의 unique 제약이 직렬화합니다.</p>
+  </div>
+
+  <h3>4.5 불변식</h3>
+  <p>구현과 테스트는 아래 불변식을 기준으로 검증합니다.</p>
+  <div class="inv">
+    <div><p>한 에포크 안에서 청크들은 <code>(시작점, 계획HWM]</code>을 <b>겹침과 빈틈 없이</b> 분할한다. CAS가 HWM을 직렬로만 전진시키기 때문이다.</p></div>
+    <div><p><code>계획HWM</code> 이하의 행은 계획 시점에 모두 보이고, 이후에 새로 생기지 않는다. 4.2와 필수조건 P1~P4가 근거다.</p></div>
+    <div><p>소스 행 하나는 앱 DB에 많아야 한 번 반영된다. fencing과 멱등 unique 제약이 같은 트랜잭션 안에 있기 때문이다.</p></div>
+    <div><p>모든 청크는 결국 <code>DONE</code>이나 <code>DEAD</code>에 도달한다. 리스 만료로 재claim되고, Reaper가 시도 횟수를 다 쓴 청크를 DEAD로 바꾸기 때문이다.</p></div>
+    <div><p><code>DEAD</code>가 하나라도 생기면 해당 소스의 Planner가 멈추고 알람이 울린다. 처리되지 않은 빈틈을 남긴 채 계속 전진하지 않는다.</p></div>
+  </div>
+</section>
+
+<!-- 05 -->
+<section class="card" id="tables" aria-labelledby="h-tables">
+  <h2 id="h-tables"><span class="num">05</span>논리 테이블 설계</h2>
+  <p>모두 앱 DB에 둡니다. 컬럼명은 한글 논리명이고, 물리명은 06장 DDL에 대응합니다. <b>NN</b>은 NOT NULL입니다. 소스 테이블은 읽기만 하므로 여기서 설계하지 않습니다.</p>
+
+  <!-- 폴링소스 -->
+  <div class="tblhead"><h3>폴링소스</h3><span class="phys">poll_source · 소스 테이블당 1행 · 계획·완료 진행선과 운영 상태</span></div>
+  <div class="table-wrap"><table class="ldm">
+    <thead><tr><th>컬럼명</th><th>타입</th><th>NN</th><th>키·기본값</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td>소스ID</td><td class="ty">varchar(64)</td><td class="nn">Y</td><td class="key">PK</td><td>소스 식별자. 예: <code>order_line</code></td></tr>
+      <tr><td>소스에포크</td><td class="ty">bigint</td><td class="nn">Y</td><td class="key">1</td><td>HWM을 리셋하거나 커서 정의를 바꿀 때 증가. 이전 에포크 워커를 차단</td></tr>
+      <tr><td>설정해시</td><td class="ty">varchar(64)</td><td class="nn">Y</td><td></td><td>커서 정의(테이블, 컬럼, 타입, collation, 인덱스)의 SHA-256. 기동할 때 YAML과 대조</td></tr>
+      <tr><td>소스스키마명</td><td class="ty">varchar(63)</td><td class="nn">Y</td><td></td><td>복제본의 스키마</td></tr>
+      <tr><td>소스테이블명</td><td class="ty">varchar(63)</td><td class="nn">Y</td><td></td><td>복제본의 테이블</td></tr>
+      <tr><td>커서인덱스명</td><td class="ty">varchar(127)</td><td class="nn">Y</td><td></td><td>스키마를 포함한 인덱스 이름. 카탈로그 검증 대상</td></tr>
+      <tr><td>운영상태</td><td class="ty">varchar(16)</td><td class="nn">Y</td><td class="key">'ACTIVE'</td><td><code>ACTIVE</code> / <code>SOFT_PAUSED</code>(Planner만 중지) / <code>HARD_PAUSED</code>(claim도 중지)</td></tr>
+      <tr><td>일시정지사유</td><td class="ty">text</td><td class="nn">N</td><td></td><td>예: <code>DEAD_CHUNK:1234</code>, <code>OPERATOR</code></td></tr>
+      <tr><td>초기시작일시</td><td class="ty">timestamptz</td><td class="nn">Y</td><td></td><td>첫 청크의 시작점(<code>created_at &gt;= 이 값</code>)</td></tr>
+      <tr><td>계획HWM</td><td class="ty">text[]</td><td class="nn">Y</td><td class="key">'{}'</td><td>마지막으로 잘린 커서 키 전체 튜플. 빈 배열이면 아직 청크가 없음</td></tr>
+      <tr><td>계획HWM생성일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td>계획HWM의 <code>created_at</code>. 모니터링용</td></tr>
+      <tr><td>완료HWM</td><td class="ty">text[]</td><td class="nn">Y</td><td class="key">'{}'</td><td>앞에서부터 빈틈없이 DONE인 마지막 경계. sweep의 상한</td></tr>
+      <tr><td>완료HWM생성일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td>완료HWM의 <code>created_at</code>. end-to-end 지연 지표</td></tr>
+      <tr><td>청크크기</td><td class="ty">integer</td><td class="nn">Y</td><td class="key">1000</td><td>청크 하나의 최대 행 수</td></tr>
+      <tr><td>페이지크기</td><td class="ty">integer</td><td class="nn">Y</td><td class="key">500</td><td>복제본 조회 한 번에 읽는 행 수</td></tr>
+      <tr><td>Planner주기ms</td><td class="ty">integer</td><td class="nn">Y</td><td class="key">1000</td><td>꼬리 추적 모드의 청크 생성 간격. 작은 청크가 남발되지 않게 하는 장치</td></tr>
+      <tr><td>최대대기청크수</td><td class="ty">integer</td><td class="nn">Y</td><td class="key">64</td><td>READY + CLAIMED 수의 상한(백프레셔)</td></tr>
+      <tr><td>안전지연초</td><td class="ty">integer</td><td class="nn">Y</td><td></td><td>safety_lag. B + 여유 이상</td></tr>
+      <tr><td>최대시도횟수</td><td class="ty">integer</td><td class="nn">Y</td><td class="key">5</td><td>claim 횟수 기준. 다 쓰면 DEAD</td></tr>
+      <tr><td>리스초</td><td class="ty">integer</td><td class="nn">Y</td><td class="key">60</td><td>청크 리스 시간</td></tr>
+      <tr><td>Planner소유자</td><td class="ty">varchar(128)</td><td class="nn">N</td><td></td><td><code>pod명:스레드</code>. 중복 조회 억제용</td></tr>
+      <tr><td>Planner리스만료일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td>Planner 리스 만료 시각</td></tr>
+      <tr><td>수정일시</td><td class="ty">timestamptz</td><td class="nn">Y</td><td class="key">now()</td><td></td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- 소스커서컬럼 -->
+  <div class="tblhead"><h3>소스커서컬럼</h3><span class="phys">source_cursor_column · 소스별 커서 컬럼 정의(타입 registry)</span></div>
+  <div class="table-wrap"><table class="ldm">
+    <thead><tr><th>컬럼명</th><th>타입</th><th>NN</th><th>키·기본값</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td>소스ID</td><td class="ty">varchar(64)</td><td class="nn">Y</td><td class="key">PK, FK→폴링소스</td><td></td></tr>
+      <tr><td>순번</td><td class="ty">smallint</td><td class="nn">Y</td><td class="key">PK</td><td>1 = 생성일시 컬럼(필수), 2 이상 = PK 컬럼(인덱스 순서와 같음)</td></tr>
+      <tr><td>컬럼명</td><td class="ty">varchar(63)</td><td class="nn">Y</td><td></td><td>소스의 실제 컬럼명</td></tr>
+      <tr><td>타입명</td><td class="ty">varchar(32)</td><td class="nn">Y</td><td></td><td>허용 목록: <code>timestamptz, timestamp, varchar, text, int4, int8, uuid</code></td></tr>
+      <tr><td>Collation명</td><td class="ty">varchar(127)</td><td class="nn">N</td><td></td><td>문자열 컬럼만 해당. 인덱스 collation과 같아야 함. 예: <code>pg_catalog.C</code></td></tr>
+      <tr><td>소스키여부</td><td class="ty">boolean</td><td class="nn">Y</td><td class="key">true</td><td>멱등 키(소스키)에 포함할지 여부. 순번 1은 false</td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- 폴링청크 -->
+  <div class="tblhead"><h3>폴링청크</h3><span class="phys">poll_chunk · 활성 작업 항목 · 작게 유지</span></div>
+  <div class="table-wrap"><table class="ldm">
+    <thead><tr><th>컬럼명</th><th>타입</th><th>NN</th><th>키·기본값</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td>청크ID</td><td class="ty">bigint</td><td class="nn">Y</td><td class="key">PK, IDENTITY</td><td>한 에포크 안에서 커서 순서와 단조 일치</td></tr>
+      <tr><td>소스ID</td><td class="ty">varchar(64)</td><td class="nn">Y</td><td class="key">FK→폴링소스</td><td></td></tr>
+      <tr><td>소스에포크</td><td class="ty">bigint</td><td class="nn">Y</td><td></td><td>생성 당시 에포크</td></tr>
+      <tr><td>설정해시</td><td class="ty">varchar(64)</td><td class="nn">Y</td><td></td><td>생성 당시 커서 정의</td></tr>
+      <tr><td>시작커서값</td><td class="ty">text[]</td><td class="nn">Y</td><td class="key">UK(소스ID, 에포크, 시작커서값)</td><td>미포함 하한. 빈 배열이면 <code>created_at &gt;= 초기시작일시</code></td></tr>
+      <tr><td>종료커서값</td><td class="ty">text[]</td><td class="nn">Y</td><td></td><td>포함 상한</td></tr>
+      <tr><td>종료생성일시</td><td class="ty">timestamptz</td><td class="nn">Y</td><td></td><td>종료커서값의 created_at. 지연 모니터링용</td></tr>
+      <tr><td>상태</td><td class="ty">varchar(16)</td><td class="nn">Y</td><td class="key">'READY'</td><td><code>READY / CLAIMED / DONE / DEAD</code></td></tr>
+      <tr><td>리스토큰</td><td class="ty">bigint</td><td class="nn">Y</td><td class="key">0</td><td>claim할 때마다 +1. fencing token</td></tr>
+      <tr><td>리스소유자</td><td class="ty">varchar(128)</td><td class="nn">N</td><td></td><td>CLAIMED일 때만 값이 있음(CHECK)</td></tr>
+      <tr><td>리스만료일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td>CLAIMED일 때만 값이 있음(CHECK)</td></tr>
+      <tr><td>시도횟수</td><td class="ty">integer</td><td class="nn">Y</td><td class="key">0</td><td>claim 횟수</td></tr>
+      <tr><td>다음시도일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td>실패 후 재시도 백오프</td></tr>
+      <tr><td>선점일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td>마지막 claim 시각</td></tr>
+      <tr><td>최종하트비트일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td></td></tr>
+      <tr><td>처리건수</td><td class="ty">integer</td><td class="nn">N</td><td></td><td>복제본에서 읽은 행 수</td></tr>
+      <tr><td>신규건수</td><td class="ty">integer</td><td class="nn">N</td><td></td><td>멱등에 새로 들어간 행 수 = 아웃박스 기록 수</td></tr>
+      <tr><td>최종오류코드</td><td class="ty">varchar(64)</td><td class="nn">N</td><td></td><td>SQLSTATE 또는 내부 코드</td></tr>
+      <tr><td>최종오류메시지</td><td class="ty">text</td><td class="nn">N</td><td></td><td>최대 4,000자. 민감한 값은 마스킹</td></tr>
+      <tr><td>최종오류일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td></td></tr>
+      <tr><td>생성일시</td><td class="ty">timestamptz</td><td class="nn">Y</td><td class="key">now()</td><td></td></tr>
+      <tr><td>완료일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td></td></tr>
+      <tr><td>DEAD일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td></td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- 폴링청크이력 -->
+  <div class="tblhead"><h3>폴링청크이력</h3><span class="phys">poll_chunk_history · 이관일시 기준 월 단위 range 파티션</span></div>
+  <p>폴링청크의 모든 컬럼에 <b>이관일시 <code>timestamptz</code> NN</b>을 더합니다. PK는 (청크ID, 이관일시)입니다. DONE 또는 DEAD가 된 행만 들어오고, 이후에는 바꾸지 않습니다. 보관 기간이 지나면 파티션째 DROP합니다.</p>
+
+  <!-- 스윕실행 -->
+  <div class="tblhead"><h3>스윕실행</h3><span class="phys">sweep_run · 누락 탐지 실행 기록</span></div>
+  <div class="table-wrap"><table class="ldm">
+    <thead><tr><th>컬럼명</th><th>타입</th><th>NN</th><th>키·기본값</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td>스윕실행ID</td><td class="ty">bigint</td><td class="nn">Y</td><td class="key">PK, IDENTITY</td><td></td></tr>
+      <tr><td>소스ID</td><td class="ty">varchar(64)</td><td class="nn">Y</td><td class="key">FK→폴링소스</td><td></td></tr>
+      <tr><td>소스에포크</td><td class="ty">bigint</td><td class="nn">Y</td><td></td><td></td></tr>
+      <tr><td>스윕유형</td><td class="ty">varchar(8)</td><td class="nn">Y</td><td></td><td><code>NEAR</code>(근거리) / <code>DAILY</code>(일일) / <code>FULL</code>(전체, 수동)</td></tr>
+      <tr><td>대상시작일시</td><td class="ty">timestamptz</td><td class="nn">Y</td><td></td><td>created_at 하한</td></tr>
+      <tr><td>대상상한커서값</td><td class="ty">text[]</td><td class="nn">Y</td><td></td><td>시작 시점의 완료HWM</td></tr>
+      <tr><td>진행커서값</td><td class="ty">text[]</td><td class="nn">Y</td><td class="key">'{}'</td><td>중단 후 재개할 지점</td></tr>
+      <tr><td>상태</td><td class="ty">varchar(16)</td><td class="nn">Y</td><td class="key">'RUNNING'</td><td><code>RUNNING / DONE / FAILED</code></td></tr>
+      <tr><td>실행소유자</td><td class="ty">varchar(128)</td><td class="nn">N</td><td></td><td></td></tr>
+      <tr><td>리스만료일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td>같은 소스·유형의 sweep이 동시에 돌지 않게 함</td></tr>
+      <tr><td>스캔건수</td><td class="ty">bigint</td><td class="nn">Y</td><td class="key">0</td><td></td></tr>
+      <tr><td>누락건수</td><td class="ty">bigint</td><td class="nn">Y</td><td class="key">0</td><td>0보다 크면 필수조건 위반 신호. 알람</td></tr>
+      <tr><td>시작일시</td><td class="ty">timestamptz</td><td class="nn">Y</td><td class="key">now()</td><td></td></tr>
+      <tr><td>종료일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td></td></tr>
+      <tr><td>오류메시지</td><td class="ty">text</td><td class="nn">N</td><td></td><td></td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- 재처리요청 -->
+  <div class="tblhead"><h3>재처리요청</h3><span class="phys">poll_replay_request · 정확 키 단위 복구 큐</span></div>
+  <div class="table-wrap"><table class="ldm">
+    <thead><tr><th>컬럼명</th><th>타입</th><th>NN</th><th>키·기본값</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td>재처리ID</td><td class="ty">bigint</td><td class="nn">Y</td><td class="key">PK, IDENTITY</td><td></td></tr>
+      <tr><td>소스ID</td><td class="ty">varchar(64)</td><td class="nn">Y</td><td class="key">UK(소스ID, 소스키)</td><td></td></tr>
+      <tr><td>소스키</td><td class="ty">jsonb</td><td class="nn">Y</td><td class="key">UK</td><td>PK 값의 JSON 배열. 예: <code>["ORD-1","01"]</code></td></tr>
+      <tr><td>요청사유</td><td class="ty">varchar(16)</td><td class="nn">Y</td><td></td><td><code>SWEEP_MISSING</code> / <code>OPERATOR</code></td></tr>
+      <tr><td>스윕실행ID</td><td class="ty">bigint</td><td class="nn">N</td><td class="key">FK→스윕실행</td><td></td></tr>
+      <tr><td>상태</td><td class="ty">varchar(16)</td><td class="nn">Y</td><td class="key">'READY'</td><td><code>READY / CLAIMED / DONE / DEAD</code></td></tr>
+      <tr><td>리스토큰</td><td class="ty">bigint</td><td class="nn">Y</td><td class="key">0</td><td>청크와 같은 fencing 규칙</td></tr>
+      <tr><td>리스소유자</td><td class="ty">varchar(128)</td><td class="nn">N</td><td></td><td></td></tr>
+      <tr><td>리스만료일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td></td></tr>
+      <tr><td>시도횟수</td><td class="ty">integer</td><td class="nn">Y</td><td class="key">0</td><td></td></tr>
+      <tr><td>최종오류메시지</td><td class="ty">text</td><td class="nn">N</td><td></td><td></td></tr>
+      <tr><td>생성일시</td><td class="ty">timestamptz</td><td class="nn">Y</td><td class="key">now()</td><td></td></tr>
+      <tr><td>완료일시</td><td class="ty">timestamptz</td><td class="nn">N</td><td></td><td></td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- 기존 테이블 요구사항 -->
+  <div class="tblhead"><h3>멱등 · 아웃박스 (기존 테이블 요구사항)</h3><span class="phys">idempotency · outbox · 이미 구현됨</span></div>
+  <div class="table-wrap"><table class="ldm">
+    <thead><tr><th>컬럼명</th><th>타입</th><th>NN</th><th>키</th><th>요구사항</th></tr></thead>
+    <tbody>
+      <tr><td>멱등.소스ID</td><td class="ty">varchar(64)</td><td class="nn">Y</td><td class="key">UK(소스ID, 소스키)</td><td>이 unique 제약이 반드시 있어야 함</td></tr>
+      <tr><td>멱등.소스키</td><td class="ty">jsonb</td><td class="nn">Y</td><td class="key">UK</td><td>복제본 SQL의 <code>jsonb_build_array(pk::text, …)</code>로만 생성(정규화 보장). <b>에포크는 포함하지 않음</b>. 그래서 HWM을 리셋해도 이벤트가 재발행되지 않음</td></tr>
+      <tr><td>아웃박스.집계키</td><td class="ty">text</td><td class="nn">Y</td><td></td><td>소스키를 Kafka 파티션 키로 사용해 키 단위 순서를 보장</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- 06 -->
+<section class="card" id="ddl" aria-labelledby="h-ddl">
+  <h2 id="h-ddl"><span class="num">06</span>물리 DDL (앱 DB)</h2>
+  <p>한글 논리명은 <code>COMMENT ON</code>으로 남기는 것을 권장합니다. 아래는 핵심 테이블입니다. 이력 테이블은 마지막 블록을 참고하세요.</p>
+  <div class="codewrap"><div class="cap"><span>DDL · poll_source / source_cursor_column</span><button class="copy" type="button">복사</button></div><pre><code>CREATE TABLE poll_source (
+  source_id            varchar(64)  PRIMARY KEY,
+  source_epoch         bigint       NOT NULL DEFAULT 1,
+  config_hash          varchar(64)  NOT NULL,
+  source_schema        varchar(63)  NOT NULL,
+  source_table         varchar(63)  NOT NULL,
+  cursor_index         varchar(127) NOT NULL,
+  run_state            varchar(16)  NOT NULL DEFAULT 'ACTIVE'
+                       CHECK (run_state IN ('ACTIVE','SOFT_PAUSED','HARD_PAUSED')),
+  pause_reason         text,
+  initial_start_ts     timestamptz  NOT NULL,
+  planned_hwm          text[]       NOT NULL DEFAULT '{}',
+  planned_created_at   timestamptz,
+  completed_hwm        text[]       NOT NULL DEFAULT '{}',
+  completed_created_at timestamptz,
+  chunk_size           integer NOT NULL DEFAULT 1000 CHECK (chunk_size &gt; 0),
+  page_size            integer NOT NULL DEFAULT 500  CHECK (page_size &gt; 0),
+  planner_interval_ms  integer NOT NULL DEFAULT 1000 CHECK (planner_interval_ms &gt;= 200),
+  max_pending          integer NOT NULL DEFAULT 64   CHECK (max_pending &gt; 0),
+  safety_lag_sec       integer NOT NULL               CHECK (safety_lag_sec &gt; 0),
+  max_attempts         integer NOT NULL DEFAULT 5    CHECK (max_attempts &gt; 0),
+  lease_sec            integer NOT NULL DEFAULT 60   CHECK (lease_sec &gt;= 10),
+  planner_owner        varchar(128),
+  planner_lease_until  timestamptz,
+  updated_at           timestamptz NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE  poll_source IS '폴링소스';
+COMMENT ON COLUMN poll_source.planned_hwm   IS '계획HWM';
+COMMENT ON COLUMN poll_source.completed_hwm IS '완료HWM';
+-- (나머지 컬럼도 05장 논리명으로 COMMENT)
+
+CREATE TABLE source_cursor_column (
+  source_id      varchar(64)  NOT NULL REFERENCES poll_source(source_id),
+  position       smallint     NOT NULL CHECK (position &gt;= 1),
+  column_name    varchar(63)  NOT NULL,
+  type_name      varchar(32)  NOT NULL
+                 CHECK (type_name IN ('timestamptz','timestamp','varchar','text','int4','int8','uuid')),
+  collation_name varchar(127),
+  is_source_key  boolean      NOT NULL DEFAULT true,
+  PRIMARY KEY (source_id, position),
+  CHECK (position &lt;&gt; 1 OR (type_name IN ('timestamptz','timestamp') AND NOT is_source_key))
+);</code></pre></div>
+
+  <div class="codewrap"><div class="cap"><span>DDL · poll_chunk</span><button class="copy" type="button">복사</button></div><pre><code>CREATE TABLE poll_chunk (
+  chunk_id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  source_id          varchar(64)  NOT NULL REFERENCES poll_source(source_id),
+  source_epoch       bigint       NOT NULL,
+  config_hash        varchar(64)  NOT NULL,
+  from_key           text[]       NOT NULL,          -- exclusive, '{}' = 최초
+  to_key             text[]       NOT NULL,          -- inclusive
+  to_created_at      timestamptz  NOT NULL,
+  status             varchar(16)  NOT NULL DEFAULT 'READY'
+                     CHECK (status IN ('READY','CLAIMED','DONE','DEAD')),
+  lease_token        bigint       NOT NULL DEFAULT 0,
+  lease_owner        varchar(128),
+  lease_until        timestamptz,
+  attempts           integer      NOT NULL DEFAULT 0,
+  next_attempt_at    timestamptz,
+  claimed_at         timestamptz,
+  last_heartbeat_at  timestamptz,
+  row_count          integer,
+  inserted_count     integer,
+  last_error_code    varchar(64),
+  last_error_message text,
+  last_error_at      timestamptz,
+  created_at         timestamptz  NOT NULL DEFAULT now(),
+  done_at            timestamptz,
+  dead_at            timestamptz,
+  CONSTRAINT ck_chunk_lease
+    CHECK ((status = 'CLAIMED') = (lease_owner IS NOT NULL AND lease_until IS NOT NULL)),
+  CONSTRAINT ck_chunk_bounds
+    CHECK (cardinality(to_key) &gt; 0 AND (cardinality(from_key) = 0 OR cardinality(from_key) = cardinality(to_key)))
+);
+CREATE UNIQUE INDEX ux_chunk_range   ON poll_chunk (source_id, source_epoch, from_key);
+CREATE INDEX        ix_chunk_ready   ON poll_chunk (source_id, chunk_id)    WHERE status = 'READY';
+CREATE INDEX        ix_chunk_claimed ON poll_chunk (source_id, lease_until) WHERE status = 'CLAIMED';
+CREATE INDEX        ix_chunk_open    ON poll_chunk (source_id, chunk_id)    WHERE status &lt;&gt; 'DONE';
+
+-- 갱신이 잦은 작은 테이블: 공격적인 autovacuum
+ALTER TABLE poll_chunk SET (
+  fillfactor = 80,
+  autovacuum_vacuum_scale_factor  = 0.01,
+  autovacuum_vacuum_threshold     = 1000,
+  autovacuum_analyze_scale_factor = 0.02
+);
+COMMENT ON TABLE poll_chunk IS '폴링청크';</code></pre></div>
+
+  <div class="codewrap"><div class="cap"><span>DDL · 이력 · 스윕 · 재처리</span><button class="copy" type="button">복사</button></div><pre><code>CREATE TABLE poll_chunk_history (
+  LIKE poll_chunk INCLUDING DEFAULTS,          -- IDENTITY·CHECK는 복사하지 않음
+  archived_at timestamptz NOT NULL,
+  PRIMARY KEY (chunk_id, archived_at)
+) PARTITION BY RANGE (archived_at);
+CREATE TABLE poll_chunk_history_2026_11 PARTITION OF poll_chunk_history
+  FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+COMMENT ON TABLE poll_chunk_history IS '폴링청크이력';
+
+CREATE TABLE sweep_run (
+  sweep_run_id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  source_id        varchar(64) NOT NULL REFERENCES poll_source(source_id),
+  source_epoch     bigint      NOT NULL,
+  sweep_kind       varchar(8)  NOT NULL CHECK (sweep_kind IN ('NEAR','DAILY','FULL')),
+  window_from      timestamptz NOT NULL,
+  upper_key        text[]      NOT NULL,
+  progress_key     text[]      NOT NULL DEFAULT '{}',
+  status           varchar(16) NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING','DONE','FAILED')),
+  run_owner        varchar(128),
+  lease_until      timestamptz,
+  scanned_count    bigint      NOT NULL DEFAULT 0,
+  missing_count    bigint      NOT NULL DEFAULT 0,
+  started_at       timestamptz NOT NULL DEFAULT now(),
+  finished_at      timestamptz,
+  error_message    text
+);
+CREATE UNIQUE INDEX ux_sweep_running ON sweep_run (source_id, sweep_kind) WHERE status = 'RUNNING';
+COMMENT ON TABLE sweep_run IS '스윕실행';
+
+CREATE TABLE poll_replay_request (
+  replay_id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  source_id          varchar(64) NOT NULL REFERENCES poll_source(source_id),
+  source_key         jsonb       NOT NULL,
+  reason             varchar(16) NOT NULL CHECK (reason IN ('SWEEP_MISSING','OPERATOR')),
+  sweep_run_id       bigint      REFERENCES sweep_run(sweep_run_id),
+  status             varchar(16) NOT NULL DEFAULT 'READY' CHECK (status IN ('READY','CLAIMED','DONE','DEAD')),
+  lease_token        bigint      NOT NULL DEFAULT 0,
+  lease_owner        varchar(128),
+  lease_until        timestamptz,
+  attempts           integer     NOT NULL DEFAULT 0,
+  last_error_message text,
+  created_at         timestamptz NOT NULL DEFAULT now(),
+  done_at            timestamptz,
+  UNIQUE (source_id, source_key)
+);
+CREATE INDEX ix_replay_open ON poll_replay_request (source_id, replay_id) WHERE status IN ('READY','CLAIMED');
+COMMENT ON TABLE poll_replay_request IS '재처리요청';</code></pre></div>
+</section>
+
+<!-- 07 -->
+<section class="card" id="states" aria-labelledby="h-states">
+  <h2 id="h-states"><span class="num">07</span>청크 상태 전이</h2>
+  <div class="figure">
+    <svg viewBox="0 0 860 300" role="img" aria-label="상태 전이: READY에서 claim하면 CLAIMED, CLAIMED에서 완료 트랜잭션이면 DONE, 재시도 가능한 실패면 READY, 시도 초과면 DEAD. 만료된 CLAIMED는 재claim, DONE과 DEAD는 이력으로 이관">
+      <defs>
+        <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
+      </defs>
+      <rect x="40"  y="100" width="150" height="60" rx="30" fill="var(--idle-bg)" stroke="var(--idle)"/>
+      <text x="115" y="136" text-anchor="middle" font-size="15" font-weight="700" fill="var(--idle)">READY</text>
+      <rect x="350" y="100" width="160" height="60" rx="30" fill="var(--warn-bg)" stroke="var(--warn)"/>
+      <text x="430" y="136" text-anchor="middle" font-size="15" font-weight="700" fill="var(--warn)">CLAIMED</text>
+      <rect x="670" y="100" width="150" height="60" rx="30" fill="var(--ok-bg)" stroke="var(--ok)"/>
+      <text x="745" y="136" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ok)">DONE</text>
+      <rect x="350" y="225" width="160" height="56" rx="28" fill="var(--bad-bg)" stroke="var(--bad)"/>
+      <text x="430" y="259" text-anchor="middle" font-size="15" font-weight="700" fill="var(--bad)">DEAD</text>
+
+      <line x1="190" y1="118" x2="346" y2="118" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <text x="268" y="108" text-anchor="middle" font-size="12" fill="var(--ink)">① claim · 토큰+1 · 시도+1</text>
+      <line x1="350" y1="146" x2="194" y2="146" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <text x="268" y="168" text-anchor="middle" font-size="12" fill="var(--ink)">③ 실패(재시도 가능) · 백오프</text>
+      <line x1="510" y1="130" x2="666" y2="130" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <text x="588" y="120" text-anchor="middle" font-size="12" fill="var(--ink)">② 완료 TX (토큰 일치)</text>
+      <line x1="430" y1="160" x2="430" y2="221" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <text x="440" y="196" font-size="12" fill="var(--ink)">④ 시도 초과 · 치명 오류</text>
+      <path d="M400,100 C380,40 480,40 460,98" fill="none" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <text x="430" y="34" text-anchor="middle" font-size="12" fill="var(--ink)">⑤ 리스 만료 → 재claim / heartbeat</text>
+      <text x="745" y="190" text-anchor="middle" font-size="12" fill="var(--muted)">보관 후 이력 이관</text>
+      <text x="600" y="262" font-size="12" fill="var(--muted)">이력 이관 → 운영자 재등록 (11장)</text>
+    </svg>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>전이</th><th>주체</th><th>SQL 조건 요지</th><th>함께 일어나는 일</th></tr></thead>
+      <tbody>
+        <tr><td>①</td><td>READY → CLAIMED</td><td>Worker</td><td><code>attempts &lt; max</code>, <code>next_attempt_at</code> 경과, 소스가 HARD_PAUSED가 아님, <code>SKIP LOCKED</code></td><td>토큰+1, 시도+1, 리스 설정</td></tr>
+        <tr><td>②</td><td>CLAIMED → DONE</td><td>Worker</td><td><code>lease_token = 내 토큰 AND status = 'CLAIMED' AND source_epoch = 내 에포크</code></td><td>같은 트랜잭션에서 멱등과 아웃박스 기록. 0행이면 롤백</td></tr>
+        <tr><td>③</td><td>CLAIMED → READY</td><td>Worker</td><td>토큰 일치, <code>attempts &lt; max</code></td><td>리스 해제, 오류 기록, <code>next_attempt_at</code> 설정</td></tr>
+        <tr><td>④</td><td>CLAIMED·READY → DEAD</td><td>Worker, Reaper</td><td>토큰 일치이면서 <code>attempts &gt;= max</code>(Worker), 또는 만료이면서 <code>attempts &gt;= max</code>(Reaper)</td><td>같은 트랜잭션에서 소스를 SOFT_PAUSED로 바꾸고 알람</td></tr>
+        <tr><td>⑤</td><td>CLAIMED → CLAIMED</td><td>Worker</td><td>재claim: <code>lease_until &lt; now</code>. heartbeat: 토큰·소유자 일치이고 아직 유효함</td><td>재claim이면 토큰+1이 되어 기존 소유자의 완료가 차단됨</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><code>DONE</code>과 <code>DEAD</code>는 종료 상태입니다. 상태를 되돌리지 않고, 재처리는 새 청크나 재처리 요청으로 만듭니다.</p>
+</section>
+
+<!-- 08 -->
+<section class="card" id="flows" aria-labelledby="h-flows">
+  <h2 id="h-flows"><span class="num">08</span>처리 흐름과 SQL</h2>
+  <p>예시 소스는 <code>sales.order_line</code>이고, 커서는 <code>(created_at timestamptz, order_no varchar "C", line_no varchar "C")</code>입니다. 실제 SQL은 09장의 렌더러가 소스 정의로 생성합니다. 표기법: <code>:name</code>은 바인드 변수, <span class="chip acc">복제본</span>과 <span class="chip ok">앱 DB</span>는 실행 위치입니다.</p>
+
+  <h3>8.1 Planner</h3>
+  <ol class="steps">
+    <li><div><span class="chip ok">앱 DB</span> Planner 리스를 짧은 단독 트랜잭션으로 획득합니다. 0행이면 다른 pod가 담당 중이므로 이번 주기는 건너뜁니다.</div></li>
+    <li><div><span class="chip acc">복제본</span> <code>safe_ts</code>를 구합니다. <code>replay_ts</code>가 null이면 건너뜁니다.</div></li>
+    <li><div><span class="chip acc">복제본</span> 다음 경계를 조회합니다. 트랜잭션 밖에서 실행합니다.</div></li>
+    <li><div><span class="chip ok">앱 DB</span> CAS로 HWM을 전진시키고 청크를 INSERT합니다. 둘이 한 트랜잭션입니다. 경계 조회 결과가 청크크기만큼 꽉 차 있으면 3단계부터 반복하고(따라잡기 모드), 아니면 다음 주기까지 쉽니다(꼬리 추적 모드).</div></li>
+  </ol>
+  <div class="codewrap"><div class="cap"><span>① Planner 리스 · 앱 DB</span><button class="copy" type="button">복사</button></div><pre><code>UPDATE poll_source
+SET planner_owner = :owner,
+    planner_lease_until = statement_timestamp() + make_interval(secs =&gt; :planner_lease_sec)
+WHERE source_id = :source_id
+  AND run_state = 'ACTIVE'
+  AND (planner_lease_until IS NULL
+       OR planner_lease_until &lt; statement_timestamp()
+       OR planner_owner = :owner)
+RETURNING source_epoch, config_hash, planned_hwm, initial_start_ts,
+          chunk_size, max_pending, safety_lag_sec;</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>② safe_ts · 복제본</span><button class="copy" type="button">복사</button></div><pre><code>SELECT pg_is_in_recovery()                                         AS in_recovery,     -- false면 즉시 중단(잘못된 엔드포인트)
+       pg_last_xact_replay_timestamp()                             AS replay_ts,
+       pg_last_xact_replay_timestamp() - make_interval(secs =&gt; :lag) AS safe_ts;</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>③ 경계 조회 · 복제본 (planned_hwm이 '{}'면 row 비교 대신 created_at &gt;= :initial_start_ts)</span><button class="copy" type="button">복사</button></div><pre><code>WITH batch AS (
+  SELECT created_at, order_no, line_no
+  FROM "sales"."order_line"
+  WHERE ("created_at", "order_no" COLLATE "pg_catalog"."C", "line_no" COLLATE "pg_catalog"."C")
+      &gt; (CAST(:a1 AS timestamptz),
+         CAST(:a2 AS varchar) COLLATE "pg_catalog"."C",
+         CAST(:a3 AS varchar) COLLATE "pg_catalog"."C")
+    AND "created_at" &lt; CAST(:safe_ts AS timestamptz)
+  ORDER BY "created_at", "order_no" COLLATE "pg_catalog"."C", "line_no" COLLATE "pg_catalog"."C"
+  LIMIT :chunk_size
+)
+SELECT ARRAY[created_at::text, order_no::text, line_no::text] AS to_key,
+       created_at                                             AS to_created_at,
+       (SELECT count(*) FROM batch)                            AS row_count
+FROM batch
+ORDER BY created_at DESC, order_no COLLATE "pg_catalog"."C" DESC, line_no COLLATE "pg_catalog"."C" DESC
+LIMIT 1;                                   -- 결과 없음 = 새 데이터 없음</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>④ CAS 확정 · 앱 DB · 단일 트랜잭션</span><button class="copy" type="button">복사</button></div><pre><code>UPDATE poll_source AS s
+SET planned_hwm = :to_key, planned_created_at = :to_created_at, updated_at = statement_timestamp()
+WHERE s.source_id    = :source_id
+  AND s.source_epoch = :source_epoch
+  AND s.config_hash  = :config_hash
+  AND s.run_state    = 'ACTIVE'
+  AND s.planned_hwm  = :expected_hwm                     -- CAS
+  AND (SELECT count(*) FROM poll_chunk c
+       WHERE c.source_id = s.source_id AND c.source_epoch = s.source_epoch
+         AND c.status IN ('READY','CLAIMED')) &lt; s.max_pending;
+-- 위 UPDATE가 정확히 1행일 때만 계속하고, 아니면 ROLLBACK 후 결과를 버린다
+INSERT INTO poll_chunk (source_id, source_epoch, config_hash, from_key, to_key, to_created_at)
+VALUES (:source_id, :source_epoch, :config_hash, :expected_hwm, :to_key, :to_created_at);
+COMMIT;</code></pre></div>
+
+  <h3>8.2 Worker</h3>
+  <div class="codewrap"><div class="cap"><span>claim · 앱 DB · 단독 트랜잭션</span><button class="copy" type="button">복사</button></div><pre><code>WITH candidate AS MATERIALIZED (
+  SELECT c.chunk_id
+  FROM poll_chunk c
+  JOIN poll_source s ON s.source_id = c.source_id AND s.source_epoch = c.source_epoch
+  WHERE c.source_id = :source_id
+    AND s.run_state &lt;&gt; 'HARD_PAUSED'
+    AND c.attempts &lt; s.max_attempts
+    AND (   (c.status = 'READY'   AND (c.next_attempt_at IS NULL OR c.next_attempt_at &lt;= statement_timestamp()))
+         OR (c.status = 'CLAIMED' AND c.lease_until &lt; statement_timestamp()))
+  ORDER BY c.chunk_id
+  LIMIT 1
+  FOR UPDATE OF c SKIP LOCKED
+)
+UPDATE poll_chunk AS c
+SET status      = 'CLAIMED',
+    lease_token = c.lease_token + 1,
+    lease_owner = :owner,
+    lease_until = statement_timestamp() + make_interval(secs =&gt; :lease_sec),
+    attempts    = c.attempts + 1,
+    claimed_at  = statement_timestamp()
+FROM candidate x
+WHERE c.chunk_id = x.chunk_id
+  AND (c.status = 'READY' OR (c.status = 'CLAIMED' AND c.lease_until &lt; statement_timestamp()))
+RETURNING c.chunk_id, c.source_epoch, c.from_key, c.to_key, c.lease_token;</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>범위 조회 · 복제본 · 페이지마다 반복 (after = 직전 페이지 마지막 cursor_key, 최초는 from_key)</span><button class="copy" type="button">복사</button></div><pre><code>SELECT jsonb_build_array(t.order_no::text, t.line_no::text)::text        AS source_key,
+       ARRAY[t.created_at::text, t.order_no::text, t.line_no::text]   AS cursor_key,
+       to_jsonb(t)::text                                              AS payload
+FROM (
+  SELECT order_no, line_no, created_at, item_cd, qty                 -- select-columns
+  FROM "sales"."order_line"
+  WHERE ("created_at", "order_no" COLLATE "pg_catalog"."C", "line_no" COLLATE "pg_catalog"."C")
+      &gt; (CAST(:a1 AS timestamptz), CAST(:a2 AS varchar) COLLATE "pg_catalog"."C", CAST(:a3 AS varchar) COLLATE "pg_catalog"."C")
+    AND ("created_at", "order_no" COLLATE "pg_catalog"."C", "line_no" COLLATE "pg_catalog"."C")
+      &lt;= (CAST(:t1 AS timestamptz), CAST(:t2 AS varchar) COLLATE "pg_catalog"."C", CAST(:t3 AS varchar) COLLATE "pg_catalog"."C")
+  ORDER BY "created_at", "order_no" COLLATE "pg_catalog"."C", "line_no" COLLATE "pg_catalog"."C"
+  LIMIT :page_size
+) t;</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>heartbeat · 앱 DB · lease_sec/3 간격 · 0행이면 즉시 처리 중단</span><button class="copy" type="button">복사</button></div><pre><code>UPDATE poll_chunk
+SET lease_until = statement_timestamp() + make_interval(secs =&gt; :lease_sec),
+    last_heartbeat_at = statement_timestamp()
+WHERE chunk_id = :chunk_id AND status = 'CLAIMED'
+  AND lease_token = :token AND lease_owner = :owner
+  AND lease_until &gt; statement_timestamp();</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>완료 · 앱 DB · 단일 트랜잭션 (멱등·아웃박스의 컬럼명은 기존 테이블에 맞춰 조정)</span><button class="copy" type="button">복사</button></div><pre><code>-- (1) 멱등 + 신규분만 아웃박스 : 반환 update count = 아웃박스 기록 수 = 신규건수
+WITH input AS (
+  SELECT k::jsonb AS source_key, p::jsonb AS payload
+  FROM unnest(CAST(:keys AS text[]), CAST(:payloads AS text[])) AS u(k, p)
+), inserted AS (
+  INSERT INTO idempotency (source_id, source_key, created_at)
+  SELECT :source_id, i.source_key, statement_timestamp() FROM input i
+  ON CONFLICT (source_id, source_key) DO NOTHING
+  RETURNING source_key
+)
+INSERT INTO outbox (event_id, aggregate_key, event_type, payload, created_at)
+SELECT gen_random_uuid(), ins.source_key::text, :event_type, i.payload, statement_timestamp()
+FROM inserted ins JOIN input i ON i.source_key = ins.source_key;
+
+-- (2) fencing 완료 : 1행이 아니면 예외를 던져 (1)까지 전부 롤백
+UPDATE poll_chunk
+SET status = 'DONE', lease_owner = NULL, lease_until = NULL,
+    done_at = statement_timestamp(), row_count = :row_count, inserted_count = :inserted_count
+WHERE chunk_id = :chunk_id AND status = 'CLAIMED'
+  AND lease_token = :token AND source_epoch = :source_epoch;</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>실패 처리 · 앱 DB · DEAD면 같은 트랜잭션에서 소스 일시정지</span><button class="copy" type="button">복사</button></div><pre><code>WITH f AS (
+  UPDATE poll_chunk c
+  SET status = CASE WHEN c.attempts &gt;= s.max_attempts OR :fatal THEN 'DEAD' ELSE 'READY' END,
+      lease_owner = NULL, lease_until = NULL,
+      next_attempt_at = statement_timestamp() + make_interval(secs =&gt; :backoff_sec),
+      last_error_code = :code, last_error_message = left(:message, 4000),
+      last_error_at = statement_timestamp(),
+      dead_at = CASE WHEN c.attempts &gt;= s.max_attempts OR :fatal THEN statement_timestamp() END
+  FROM poll_source s
+  WHERE c.source_id = s.source_id
+    AND c.chunk_id = :chunk_id AND c.status = 'CLAIMED' AND c.lease_token = :token
+  RETURNING c.source_id, c.chunk_id, c.status
+)
+UPDATE poll_source s
+SET run_state = 'SOFT_PAUSED', pause_reason = 'DEAD_CHUNK:' || f.chunk_id, updated_at = statement_timestamp()
+FROM f
+WHERE f.status = 'DEAD' AND s.source_id = f.source_id AND s.run_state = 'ACTIVE';</code></pre></div>
+
+  <h3>8.3 Reaper (10초 주기, 소스마다 실행)</h3>
+  <div class="codewrap"><div class="cap"><span>(a) 시도 초과 만료 청크를 DEAD로 · 앱 DB</span><button class="copy" type="button">복사</button></div><pre><code>WITH dead AS (
+  UPDATE poll_chunk c
+  SET status = 'DEAD', lease_owner = NULL, lease_until = NULL, dead_at = statement_timestamp(),
+      last_error_code = COALESCE(c.last_error_code, 'LEASE_EXHAUSTED')
+  FROM poll_source s
+  WHERE c.source_id = s.source_id AND c.source_id = :source_id
+    AND c.attempts &gt;= s.max_attempts
+    AND (c.status = 'READY' OR (c.status = 'CLAIMED' AND c.lease_until &lt; statement_timestamp()))
+  RETURNING c.source_id, c.chunk_id
+)
+UPDATE poll_source s
+SET run_state = 'SOFT_PAUSED', pause_reason = 'DEAD_CHUNK:' || (SELECT min(chunk_id) FROM dead),
+    updated_at = statement_timestamp()
+WHERE s.source_id = :source_id AND s.run_state = 'ACTIVE' AND EXISTS (SELECT 1 FROM dead);</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>(b) 완료HWM 갱신 · 앱 DB · 처음으로 DONE이 아닌 청크 바로 앞까지</span><button class="copy" type="button">복사</button></div><pre><code>UPDATE poll_source s
+SET completed_hwm = x.to_key, completed_created_at = x.to_created_at
+FROM (
+  SELECT c.to_key, c.to_created_at
+  FROM poll_chunk c
+  WHERE c.source_id = :source_id AND c.source_epoch = :source_epoch AND c.status = 'DONE'
+    AND c.chunk_id &lt; COALESCE((SELECT min(o.chunk_id) FROM poll_chunk o
+                               WHERE o.source_id = :source_id AND o.source_epoch = :source_epoch
+                                 AND o.status &lt;&gt; 'DONE'), 9223372036854775807)
+  ORDER BY c.chunk_id DESC
+  LIMIT 1
+) x
+WHERE s.source_id = :source_id AND s.completed_hwm IS DISTINCT FROM x.to_key;</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>(c) 이력 이관 · 앱 DB · (b) 다음에 실행 · 완료HWM 이전의 DONE만</span><button class="copy" type="button">복사</button></div><pre><code>WITH moved AS (
+  DELETE FROM poll_chunk c
+  WHERE c.chunk_id IN (
+    SELECT chunk_id FROM poll_chunk
+    WHERE source_id = :source_id AND status = 'DONE'
+      AND done_at &lt; statement_timestamp() - make_interval(secs =&gt; :retention_sec)
+      AND chunk_id &lt; COALESCE((SELECT min(chunk_id) FROM poll_chunk
+                               WHERE source_id = :source_id AND status &lt;&gt; 'DONE'), 9223372036854775807)
+    ORDER BY chunk_id
+    LIMIT 1000
+    FOR UPDATE SKIP LOCKED)
+  RETURNING c.*
+)
+INSERT INTO poll_chunk_history SELECT m.*, statement_timestamp() FROM moved m;</code></pre></div>
+
+  <h3>8.4 Sweep · Replay</h3>
+  <div class="callout"><b class="t">sweep의 상한은 완료HWM입니다</b><p>계획HWM을 상한으로 잡으면 아직 처리 중인 청크의 행이 누락으로 오탐됩니다. sweep은 <b>정상 경로를 보장하는 장치가 아니라</b> 필수조건 위반을 탐지하는 장치입니다. 누락건수가 0보다 크면 writer 트랜잭션 상한(P3)이 깨졌다는 뜻이므로 즉시 알람을 보냅니다.</p></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>유형</th><th>주기</th><th>대상 범위</th><th>목적</th></tr></thead>
+      <tbody>
+        <tr><td><span class="chip acc">NEAR</span></td><td>1분</td><td><code>completed_created_at − W</code> ~ 완료HWM, W ≥ B + 주기 + 복제 지연 여유(기본 10분)</td><td>계약 위반을 빠르게 탐지</td></tr>
+        <tr><td><span class="chip acc">DAILY</span></td><td>매일 03:30</td><td>최근 48시간 ~ 완료HWM</td><td>장기 지연 커밋 탐지</td></tr>
+        <tr><td><span class="chip idle">FULL</span></td><td>수동</td><td>초기시작일시 ~ 완료HWM</td><td>감사, 업그레이드 후 검증. 위험 플래그가 붙은 소스만 상시 실행</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="codewrap"><div class="cap"><span>sweep 1페이지 · 복제본 키 조회 → 앱 DB 대조 → 재처리 요청</span><button class="copy" type="button">복사</button></div><pre><code>-- 복제본: 대상 구간의 키만 (progress_key가 '{}'면 row 비교 조건 생략)
+SELECT jsonb_build_array(order_no::text, line_no::text)::text AS source_key,
+       ARRAY[created_at::text, order_no::text, line_no::text] AS cursor_key
+FROM "sales"."order_line"
+WHERE "created_at" &gt;= :window_from
+  AND (cursor) &gt;  (:progress_key)
+  AND (cursor) &lt;= (:upper_key)                    -- 완료HWM
+ORDER BY cursor
+LIMIT 1000;
+
+-- 앱 DB: 멱등에 없는 키
+SELECT k FROM unnest(CAST(:keys AS text[])) AS u(k)
+WHERE NOT EXISTS (SELECT 1 FROM idempotency i
+                  WHERE i.source_id = :source_id AND i.source_key = u.k::jsonb);
+
+-- 앱 DB: 누락분 등록 + 진행 커서 저장 (한 트랜잭션)
+INSERT INTO poll_replay_request (source_id, source_key, reason, sweep_run_id)
+SELECT :source_id, k::jsonb, 'SWEEP_MISSING', :sweep_run_id FROM unnest(CAST(:missing AS text[])) AS u(k)
+ON CONFLICT (source_id, source_key) DO NOTHING;
+UPDATE sweep_run SET progress_key = :last_cursor_key, scanned_count = scanned_count + :n,
+       missing_count = missing_count + :m, lease_until = statement_timestamp() + interval '60 seconds'
+WHERE sweep_run_id = :sweep_run_id AND run_owner = :owner;</code></pre></div>
+  <p><b>Replay worker</b>는 재처리요청을 청크와 같은 방식(<code>SKIP LOCKED</code>, 리스토큰)으로 claim합니다. 복제본에서는 <code>WHERE (order_no, line_no) IN ((:k1a,:k1b), …)</code>로 정확한 키를 조회하고, 8.2의 완료 SQL 중 (1)을 그대로 쓴 뒤 재처리요청의 토큰을 확인해 DONE으로 바꿉니다.</p>
+</section>
+
+<!-- 09 -->
+<section class="card" id="impl" aria-labelledby="h-impl">
+  <h2 id="h-impl"><span class="num">09</span>Spring · MyBatis 구현</h2>
+
+  <h3>9.1 패키지 구조</h3>
+  <div class="codewrap"><div class="cap"><span>권장 구조</span></div><pre><code>com.example.poller
+ ├─ config/        AppDbConfig, SourceDbConfig, PollerProperties
+ ├─ spec/          SourceSpec, CursorColumn, SqlRenderer(식별자 quote·타입 allowlist), SpecValidator(카탈로그 검증)
+ ├─ planner/       PlannerScheduler, PlannerService
+ ├─ worker/        WorkerLoop, ChunkReader, CompletionService, FailureService, Heartbeat
+ ├─ reaper/        ReaperScheduler
+ ├─ sweep/         SweepScheduler, SweepService, ReplayWorker
+ ├─ mapper/source/ SourceReadMapper (+ xml)      ← source SqlSessionFactory
+ ├─ mapper/app/    PollSourceMapper, PollChunkMapper, OutboxWriteMapper, SweepMapper (+ xml) ← app SqlSessionFactory
+ └─ mybatis/       TextArrayTypeHandler</code></pre></div>
+
+  <h3>9.2 DataSource 분리</h3>
+  <div class="codewrap"><div class="cap"><span>application.yml</span><button class="copy" type="button">복사</button></div><pre><code>app-db:
+  hikari:
+    jdbc-url: jdbc:postgresql://app-db:5432/app
+    username: poller_app
+    maximum-pool-size: 24            # worker-threads + heartbeat + planner + reaper + sweep + 여유
+source-db:
+  hikari:
+    jdbc-url: jdbc:postgresql://src-replica:5432/src?ApplicationName=poller
+    username: poller_ro              # 읽기 전용 role
+    maximum-pool-size: 16            # worker-threads + planner + sweep
+    read-only: true
+    connection-init-sql: SET TIME ZONE 'UTC'
+# JVM 옵션: -Duser.timezone=UTC</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>SourceDbConfig.java (AppDbConfig도 같은 구조에 @Primary)</span><button class="copy" type="button">복사</button></div><pre><code>@Configuration
+@MapperScan(basePackages = "com.example.poller.mapper.source",
+            sqlSessionFactoryRef = "sourceSqlSessionFactory")
+public class SourceDbConfig {
+
+  @Bean @ConfigurationProperties("source-db.hikari")
+  public HikariDataSource sourceDataSource() { return new HikariDataSource(); }
+
+  @Bean
+  public SqlSessionFactory sourceSqlSessionFactory(@Qualifier("sourceDataSource") DataSource ds) throws Exception {
+    var f = new SqlSessionFactoryBean();
+    f.setDataSource(ds);
+    f.setMapperLocations(new PathMatchingResourcePatternResolver()
+        .getResources("classpath:mapper/source/*.xml"));
+    f.setTypeHandlers(new TypeHandler&lt;?&gt;[] { new TextArrayTypeHandler() });
+    return f.getObject();
+  }
+
+  @Bean
+  public DataSourceTransactionManager sourceTxManager(@Qualifier("sourceDataSource") DataSource ds) {
+    return new DataSourceTransactionManager(ds);
+  }
+}</code></pre></div>
+
+  <h3>9.3 TextArrayTypeHandler</h3>
+  <p>MyBatis 기본 <code>ArrayTypeHandler</code>는 배열 타입을 <code>VARCHAR</code>로 만들고 <code>List</code>를 지원하지 않습니다. <code>text[]</code> 전용 핸들러를 쓰고, Java에서 배열 리터럴 문자열을 직접 조립하지 않습니다.</p>
+  <div class="codewrap"><div class="cap"><span>TextArrayTypeHandler.java</span><button class="copy" type="button">복사</button></div><pre><code>@MappedTypes(String[].class)
+@MappedJdbcTypes(value = JdbcType.ARRAY, includeNullJdbcType = true)
+public class TextArrayTypeHandler extends BaseTypeHandler&lt;String[]&gt; {
+
+  @Override
+  public void setNonNullParameter(PreparedStatement ps, int i, String[] v, JdbcType t) throws SQLException {
+    ps.setArray(i, ps.getConnection().createArrayOf("text", v));
+  }
+  @Override public String[] getNullableResult(ResultSet rs, String c) throws SQLException { return read(rs.getArray(c)); }
+  @Override public String[] getNullableResult(ResultSet rs, int i) throws SQLException { return read(rs.getArray(i)); }
+  @Override public String[] getNullableResult(CallableStatement cs, int i) throws SQLException { return read(cs.getArray(i)); }
+
+  private static String[] read(Array a) throws SQLException {
+    if (a == null) return null;
+    try { return (String[]) a.getArray(); } finally { a.free(); }
+  }
+}</code></pre></div>
+
+  <h3>9.4 SQL 렌더러와 기동 검증</h3>
+  <ul class="plain">
+    <li>테이블, 컬럼, 타입, collation 같은 식별자는 <b>기동 시 한 번 렌더링</b>해 <code>SourceSpec</code>에 SQL 조각으로 보관합니다. 매퍼의 <code>${}</code>에는 이 조각만 넣습니다. 식별자는 큰따옴표로 감싸고 내부의 <code>"</code>는 두 번 씁니다. 타입은 allowlist enum에서만 고릅니다.</li>
+    <li>값은 항상 <code>#{}</code>로 바인딩하고 <code>CAST(#{p.value} AS 타입) COLLATE …</code> 형태로 씁니다.</li>
+    <li>기동 순서는 다음과 같습니다.
+      <ol class="plain">
+        <li>복제본에서 <code>pg_is_in_recovery() = true</code>인지, <code>SHOW TimeZone = UTC</code>인지, <code>SHOW DateStyle</code>이 <code>ISO</code>로 시작하는지 확인</li>
+        <li>커서 인덱스 카탈로그 검증(아래 SQL)</li>
+        <li>각 커서 타입의 <code>v = (v::text)::type</code> 왕복 표본 검증</li>
+        <li>YAML에서 계산한 설정해시와 <code>poll_source.config_hash</code> 비교. 다르면 기동을 거부하고 에포크 변경 절차(11장)로 안내</li>
+      </ol>
+    </li>
+  </ul>
+  <div class="codewrap"><div class="cap"><span>SqlRenderer 핵심</span><button class="copy" type="button">복사</button></div><pre><code>public final class SqlRenderer {
+  private static final Map&lt;String, String&gt; TYPES = Map.of(
+      "timestamptz", "timestamptz", "timestamp", "timestamp", "varchar", "varchar",
+      "text", "text", "int4", "integer", "int8", "bigint", "uuid", "uuid");
+
+  public static String ident(String name) {                  // "a""b"
+    return '"' + name.replace("\"", "\"\"") + '"';
+  }
+  public static String qualified(String dotted) {            // pg_catalog.C → "pg_catalog"."C"
+    return Arrays.stream(dotted.split("\\.")).map(SqlRenderer::ident).collect(joining("."));
+  }
+  public static String castType(String typeName) {
+    String t = TYPES.get(typeName);
+    if (t == null) throw new IllegalStateException("허용되지 않은 커서 타입: " + typeName);
+    return t;
+  }
+  /** 컬럼 표현식: "order_no" COLLATE "pg_catalog"."C" */
+  public static String colExpr(CursorColumn c) {
+    return ident(c.name()) + (c.collation() == null ? "" : " COLLATE " + qualified(c.collation()));
+  }
+}
+
+/** 바인딩 단위: value는 #{}로, castSql·collateSql은 렌더링된 조각으로 */
+public record CursorParam(String value, String castSql, String collateSql) {}</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>기동 검증 · 복제본에서 실행</span><button class="copy" type="button">복사</button></div><pre><code>SELECT a.attname, a.attnotnull, format_type(a.atttypid, a.atttypmod) AS type,
+       am.amname, i.indisvalid, i.indisready, i.indislive,
+       i.indpred IS NULL AS not_partial, i.indexprs IS NULL AS no_expr,
+       (i.indoption[k.pos - 1] &amp; 1) = 0 AS is_asc,
+       coll.collname, coll.collisdeterministic,
+       coll.collversion IS NOT DISTINCT FROM pg_collation_actual_version(coll.oid) AS collation_version_ok
+FROM pg_index i
+JOIN pg_class ci ON ci.oid = i.indexrelid
+JOIN pg_am am    ON am.oid = ci.relam
+CROSS JOIN LATERAL generate_series(1, i.indnkeyatts) AS k(pos)
+JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[k.pos - 1]
+LEFT JOIN pg_collation coll ON coll.oid = i.indcollation[k.pos - 1]
+WHERE i.indexrelid = to_regclass(:qualified_index_name)
+ORDER BY k.pos;
+-- 통과 조건: btree, valid·ready·live, partial·expression 아님, 키 수 = 커서 컬럼 수,
+--           모든 키가 NOT NULL·ASC, 순서·타입·collation이 source_cursor_column과 일치,
+--           문자열 키는 collisdeterministic AND collation_version_ok</code></pre></div>
+
+  <h3>9.5 Mapper XML</h3>
+  <p><code>RETURNING</code>으로 행을 받는 DML은 MyBatis 3.5.12+에서 <code>&lt;select affectData="true"&gt;</code>로 선언합니다.</p>
+  <div class="codewrap"><div class="cap"><span>mapper/source/SourceReadMapper.xml (발췌)</span><button class="copy" type="button">복사</button></div><pre><code>&lt;!-- spec.*Sql = 기동 시 SqlRenderer가 만든 검증된 조각, afterParams/toParams = List&lt;CursorParam&gt; --&gt;
+&lt;select id="readPage" resultType="com.example.poller.worker.SourceRow"&gt;
+  SELECT ${spec.sourceKeySql}   AS source_key,      -- jsonb_build_array(pk::text, ...)::text
+         ${spec.cursorKeySql}   AS cursor_key,      -- ARRAY[col::text, ...]
+         to_jsonb(t)::text      AS payload
+  FROM (
+    SELECT ${spec.selectColumnsSql}
+    FROM ${spec.tableSql}
+    WHERE
+    &lt;choose&gt;
+      &lt;when test="afterParams.isEmpty()"&gt;${spec.firstColSql} &amp;gt;= #{initialStartTs}&lt;/when&gt;
+      &lt;otherwise&gt;
+        (${spec.cursorColsSql}) &amp;gt; (
+        &lt;foreach collection="afterParams" item="p" separator=","&gt;CAST(#{p.value} AS ${p.castSql})${p.collateSql}&lt;/foreach&gt;)
+      &lt;/otherwise&gt;
+    &lt;/choose&gt;
+      AND (${spec.cursorColsSql}) &amp;lt;= (
+        &lt;foreach collection="toParams" item="p" separator=","&gt;CAST(#{p.value} AS ${p.castSql})${p.collateSql}&lt;/foreach&gt;)
+    ORDER BY ${spec.cursorColsSql}
+    LIMIT #{pageSize}
+  ) t
+&lt;/select&gt;</code></pre></div>
+  <div class="codewrap"><div class="cap"><span>mapper/app/PollChunkMapper.xml (발췌)</span><button class="copy" type="button">복사</button></div><pre><code>&lt;select id="claim" affectData="true" flushCache="true" resultMap="claimedChunk"&gt;
+  WITH candidate AS MATERIALIZED ( ... 8.2 claim SQL ... )
+  UPDATE poll_chunk AS c SET ...
+  RETURNING c.chunk_id, c.source_epoch, c.from_key, c.to_key, c.lease_token
+&lt;/select&gt;
+
+&lt;update id="markDone"&gt;
+  UPDATE poll_chunk
+  SET status = 'DONE', lease_owner = NULL, lease_until = NULL, done_at = statement_timestamp(),
+      row_count = #{rowCount}, inserted_count = #{insertedCount}
+  WHERE chunk_id = #{chunkId} AND status = 'CLAIMED'
+    AND lease_token = #{leaseToken} AND source_epoch = #{sourceEpoch}
+&lt;/update&gt;
+
+&lt;resultMap id="claimedChunk" type="com.example.poller.worker.ClaimedChunk"&gt;
+  &lt;result column="from_key" property="fromKey" typeHandler="com.example.poller.mybatis.TextArrayTypeHandler"/&gt;
+  &lt;result column="to_key"   property="toKey"   typeHandler="com.example.poller.mybatis.TextArrayTypeHandler"/&gt;
+&lt;/resultMap&gt;</code></pre></div>
+
+  <h3>9.6 서비스 코드 뼈대</h3>
+  <div class="codewrap"><div class="cap"><span>WorkerLoop · CompletionService</span><button class="copy" type="button">복사</button></div><pre><code>// WorkerLoop: pod마다 worker-threads개를 실행. 종료 신호를 받으면 새 claim을 멈추고 진행 중인 청크만 마무리
+while (running.get()) {
+  Optional&lt;ClaimedChunk&gt; claimed = claimService.claim(spec, ownerId);     // 앱 DB 단독 트랜잭션
+  if (claimed.isEmpty()) { backoff.sleep(); continue; }                     // 100ms → 1s
+  backoff.reset();
+  ClaimedChunk c = claimed.get();
+  try (Heartbeat hb = heartbeats.start(c)) {                                // lease/3 주기, 실패 시 hb.lost()=true
+    List&lt;SourceRow&gt; rows = reader.readAll(spec, c, hb);                    // 복제본, 페이지 반복, 페이지마다 hb 확인
+    completion.complete(spec, c, rows);                                     // 앱 DB 단일 트랜잭션
+    metrics.done(c, rows.size());
+  } catch (FencedException | LeaseLostException e) {
+    metrics.fenced(c);                                                      // 다른 워커가 가져감. 아무것도 하지 않음
+  } catch (Exception e) {
+    failure.fail(c, e);                                                     // 재시도 가능하면 READY, 아니면 DEAD + 소스 일시정지
+  }
+}
+
+@Service
+public class CompletionService {
+  @Transactional(transactionManager = "appTxManager")                     // 앱 DB 하나의 커넥션·트랜잭션
+  public void complete(SourceSpec spec, ClaimedChunk c, List&lt;SourceRow&gt; rows) {
+    int inserted = rows.isEmpty() ? 0 : outboxMapper.insertIdempotentWithOutbox(
+        spec.id(), spec.eventType(), keys(rows), payloads(rows));
+    int updated = chunkMapper.markDone(c.chunkId(), c.leaseToken(), c.sourceEpoch(), rows.size(), inserted);
+    if (updated != 1) throw new FencedException(c);                         // RuntimeException이므로 전체 롤백
+  }
+}</code></pre></div>
+  <div class="callout warn"><b class="t">구현할 때 흔한 실수</b>
+    <ul class="plain">
+      <li><code>FencedException</code>을 트랜잭션 안에서 catch하고 정상 반환하면 좀비 워커의 기록이 커밋됩니다. 예외는 반드시 트랜잭션 경계 밖으로 던집니다.</li>
+      <li>복제본 조회를 <code>@Transactional(appTxManager)</code> 안에서 하면 앱 DB 트랜잭션이 길어집니다. 조회는 완료 트랜잭션보다 먼저, 밖에서 합니다.</li>
+      <li>경계값을 <code>OffsetDateTime</code>이나 <code>LocalDateTime</code>으로 받아 다시 넘기면 정밀도와 타임존 문제가 생깁니다. 항상 <code>String[]</code>으로 왕복합니다.</li>
+      <li>복제본 오류 SQLSTATE <code>40001</code>(recovery conflict로 취소), <code>57014</code>(statement timeout)은 같은 페이지를 재시도합니다. 백오프와 지터를 넣고, 재시도 예산을 넘기면 실패 처리합니다.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 10 -->
+<section class="card" id="config" aria-labelledby="h-config">
+  <h2 id="h-config"><span class="num">10</span>설정값 가이드</h2>
+  <div class="codewrap"><div class="cap"><span>poller 설정 (YAML이 원본. 기동 시 poll_source와 source_cursor_column에 upsert)</span><button class="copy" type="button">복사</button></div><pre><code>poller:
+  owner-id: ${HOSTNAME}
+  worker-threads: 8
+  claim-backoff: { min: 100ms, max: 1s }
+  reaper-interval: 10s
+  archive-retention: 6h
+  sweep:
+    near:  { interval: 1m, window: 10m }
+    daily: { cron: "0 30 3 * * *", window: 48h }
+  sources:
+    - id: order_line
+      schema: sales
+      table: order_line
+      cursor-index: sales.ix_order_line_poll_cursor
+      cursor-columns:                       # 순서 = 인덱스 순서
+        - { name: created_at, type: timestamptz }
+        - { name: order_no,   type: varchar, collation: pg_catalog.C }
+        - { name: line_no,    type: varchar, collation: pg_catalog.C }
+      select-columns: [order_no, line_no, created_at, item_cd, qty]
+      event-type: ORDER_LINE_CREATED
+      initial-start: 2026-11-04T00:00:00Z
+      chunk-size: 1000
+      page-size: 500
+      planner-interval: 1s
+      max-pending: 64
+      safety-lag: 10s                       # B(5s) + 여유
+      max-attempts: 5
+      lease: 60s</code></pre></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>파라미터</th><th>기본값</th><th>정하는 방법</th><th>너무 작으면</th><th>너무 크면</th></tr></thead>
+      <tbody>
+        <tr><td><code>safety-lag</code></td><td>10s</td><td>B(쓰기 트랜잭션 상한) + 시계·WAL 여유 2~5초</td><td><span class="chip bad">누락</span> sweep 알람</td><td>지연 증가</td></tr>
+        <tr><td><code>chunk-size</code></td><td>1000</td><td>완료 트랜잭션이 1~3초 안에 끝나는 크기</td><td>조율 비용 증가</td><td>긴 트랜잭션, 재시도 비용 증가</td></tr>
+        <tr><td><code>page-size</code></td><td>500</td><td>복제본 쿼리 하나가 1초 안에 끝나는 크기</td><td>왕복 증가</td><td>recovery conflict 취소 위험</td></tr>
+        <tr><td><code>planner-interval</code></td><td>1s</td><td>목표 지연과 청크 수의 균형</td><td>작은 청크 남발, 테이블 bloat</td><td>지연 증가</td></tr>
+        <tr><td><code>max-pending</code></td><td>64</td><td>전체 워커 수 × 2~4</td><td>워커 유휴</td><td>장애 시 재처리량 증가</td></tr>
+        <tr><td><code>lease</code></td><td>60s</td><td>청크 처리시간 p99 × 3 이상. heartbeat는 lease/3</td><td>재claim 반복(livelock)</td><td>pod 장애 복구 지연</td></tr>
+        <tr><td><code>max-attempts</code></td><td>5</td><td>일시 장애를 흡수할 만큼</td><td>DEAD 과다</td><td>독성 데이터 반복 처리</td></tr>
+        <tr><td><code>worker-threads</code></td><td>8</td><td>소스 유입 TPS ÷ 워커 하나의 처리량, 복제본 커넥션 한도 안에서</td><td>backlog 증가</td><td>복제본·앱 DB 부하</td></tr>
+        <tr><td><code>sweep.near.window</code></td><td>10m</td><td>B + sweep 주기 + 최대 복제 지연 + 여유</td><td>위반을 탐지하지 못함</td><td>복제본 읽기 증가</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><b>지연 예산 예시</b>(safety-lag 10초 기준): 복제 지연 &lt;1초 + safety lag 10초 + Planner 주기 ≤1초 + claim과 처리 0.5초 + 릴레이 주기 ≈ <b>12~13초</b>. 지연을 줄이는 지렛대는 B를 줄이는 것, 즉 소스의 쓰기 트랜잭션을 짧게 만드는 것입니다.</p>
+</section>
+
+<!-- 11 -->
+<section class="card" id="ops" aria-labelledby="h-ops">
+  <h2 id="h-ops"><span class="num">11</span>모니터링 · 운영</h2>
+  <h3>11.1 지표와 알람</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>영역</th><th>지표</th><th>알람 조건</th></tr></thead>
+      <tbody>
+        <tr><td>진척</td><td><code>now − completed_created_at</code>(end-to-end 지연), <code>now − planned_created_at</code>, safe_ts 나이</td><td>지연 SLO 초과 5분 지속</td></tr>
+        <tr><td>큐</td><td>상태별 청크 수, 가장 오래된 READY의 나이, pending ÷ max_pending</td><td><span class="chip bad">DEAD &gt; 0</span> 즉시, 만료된 CLAIMED가 계속 있음</td></tr>
+        <tr><td>리스</td><td>재claim 비율, heartbeat 실패, 처리시간 p99 ÷ lease, fenced 롤백 수</td><td>재claim 급증, p99 &gt; lease × 0.5</td></tr>
+        <tr><td>데이터</td><td>읽은 행, 신규 수, 충돌 수(읽은 행 − 신규)</td><td>정상 운영인데 충돌 비율이 높음(중복 처리 신호)</td></tr>
+        <tr><td>sweep</td><td>실행 시간, 스캔 수, <b>누락 수</b></td><td><span class="chip bad">누락 &gt; 0</span> 즉시. 필수조건 P3 위반</td></tr>
+        <tr><td>복제본</td><td><code>now − pg_last_xact_replay_timestamp()</code>, <code>pg_stat_database_conflicts</code> 증가량, 쿼리 취소율</td><td>지연·취소 예산 초과</td></tr>
+        <tr><td>소스 writer</td><td>primary <code>pg_stat_activity</code>에서 <code>now − xact_start</code> 최대값(소스팀 협조)</td><td>B 초과 트랜잭션 존재</td></tr>
+        <tr><td>앱 DB</td><td>완료 트랜잭션 시간·롤백 수, <code>poll_chunk</code>의 <code>n_dead_tup</code>, autovacuum 시각, 커넥션 풀 대기</td><td>bloat 증가, 풀 고갈</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>로그와 trace에는 <code>source_id, source_epoch, chunk_id, lease_token, owner, attempt, SQLSTATE</code>를 공통 필드로 넣습니다. PK 값과 payload 원문은 남기지 않습니다.</p>
+
+  <h3>11.2 운영 절차 (runbook)</h3>
+  <div class="grid2">
+    <div class="tile"><div class="h">소스 추가</div><p>필수조건 P1~P8 확인 → primary에 커서 인덱스를 <code>CONCURRENTLY</code>로 생성 → 복제본에서 <code>EXPLAIN</code> 확인 → YAML 추가(초기시작일시 지정) → 낮은 워커 수로 활성화 → 지연과 sweep 누락 0 확인 후 증설</p></div>
+    <div class="tile"><div class="h">일시정지</div><p><code>SOFT_PAUSED</code>는 Planner만 멈추고 남은 청크를 소진합니다. <code>HARD_PAUSED</code>는 신규 claim까지 막고, 진행 중인 청크는 완료되거나 리스가 만료되기를 기다립니다.</p></div>
+    <div class="tile"><div class="h">DEAD 처리</div><p>원인 확인 및 수정 → DEAD 청크를 이력으로 이관(DELETE … RETURNING → INSERT) → 같은 범위로 새 READY 청크 등록(<code>attempts = 0</code>) → <code>run_state = 'ACTIVE'</code>. DEAD 원본은 이력에 그대로 남습니다.</p></div>
+    <div class="tile"><div class="h">HWM 리셋 · 커서 정의 변경</div><p>HARD_PAUSED → 리스 만료 대기 → 한 트랜잭션에서 [활성 청크 전부 이력 이관 + <code>source_epoch + 1</code>, 새 설정해시, 새 HWM] 커밋 → ACTIVE. 이전 에포크 워커의 완료 처리는 0행이 되어 롤백됩니다. 멱등 키에 에포크가 없으므로 다시 읽어도 이벤트는 재발행되지 않습니다.</p></div>
+    <div class="tile"><div class="h">이벤트 재발행</div><p>멱등 테이블이 막으므로 재처리만으로는 재발행되지 않습니다. 재발행이 필요하면 별도 replay generation과 event id 정책을 세우고 컨슈머 쪽과 합의한 뒤 진행합니다.</p></div>
+    <div class="tile"><div class="h">복제본 교체 · 업그레이드</div><p>새 엔드포인트에서 <code>pg_is_in_recovery</code>, 서버 버전, 지연, collation 버전, 인덱스 정의를 검증합니다. OS·ICU·PG 메이저 업그레이드로 collation 순서가 바뀌었다면 HARD_PAUSED → REINDEX(소스팀) → FULL sweep 또는 새 에포크로 진행합니다.</p></div>
+  </div>
+</section>
+
+<!-- 12 -->
+<section class="card" id="tests" aria-labelledby="h-tests">
+  <h2 id="h-tests"><span class="num">12</span>테스트 시나리오</h2>
+  <p>통합 테스트는 실제 PostgreSQL(Testcontainers)로 실행합니다. 가능하면 primary와 streaming standby 구성을 띄워 복제본 동작까지 검증합니다.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>분류</th><th>시나리오</th><th>기대 결과</th></tr></thead>
+      <tbody>
+        <tr><td>경계</td><td>같은 <code>created_at</code>을 가진 행이 청크크기의 3배 이상</td><td>여러 청크로 정확히 분할. 누락과 중복 0</td></tr>
+        <tr><td>경계</td><td>빈 문자열 PK, 유니코드·대소문자·따옴표·백슬래시·쉼표가 섞인 PK</td><td>text[] 왕복 후에도 순서와 동등성 유지</td></tr>
+        <tr><td>경계</td><td>마이크로초 단위 timestamptz, DST 경계, <code>timestamp</code> 타입 소스</td><td><code>v = (v::text)::type</code></td></tr>
+        <tr><td>동시성</td><td>Planner 3개를 동시에 실행</td><td>청크 범위 겹침 0, HWM 단조 증가</td></tr>
+        <tr><td>동시성</td><td>워커 32개가 청크 1만 개를 처리</td><td>멱등 행 수 = 소스 행 수, 아웃박스 수 = 신규 수</td></tr>
+        <tr><td>fencing</td><td>워커 A를 claim 후 정지 → 리스 만료 → B가 완료 → A 재개</td><td>A는 롤백, 아웃박스 중복 0</td></tr>
+        <tr><td>장애</td><td>처리 중 pod kill(EKS chaos)</td><td>리스 만료 후 재claim, 누락 0</td></tr>
+        <tr><td>DEAD</td><td>독성 행 주입으로 계속 실패</td><td>max-attempts 후 DEAD, 소스 SOFT_PAUSED, 알람</td></tr>
+        <tr><td>가시성</td><td>primary에서 트랜잭션을 B보다 길게 열어 둔 채 커밋 (계약 위반 재현)</td><td>NEAR sweep이 누락을 탐지, 재처리 후 누락 0, 알람 발생</td></tr>
+        <tr><td>복제본</td><td>복제 지연을 인위적으로 늘림, recovery conflict 유발</td><td>safe_ts가 함께 늦어짐, 취소된 쿼리는 재시도 성공</td></tr>
+        <tr><td>운영</td><td>처리 중에 에포크 리셋</td><td>이전 에포크의 완료는 롤백, 이벤트 재발행 0</td></tr>
+        <tr><td>성능</td><td>목표 TPS의 2배로 1시간 부하</td><td>지연 SLO 유지, <code>poll_chunk</code> 크기 안정</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+
+<footer>범위 청크 + 리스 기반 Read-Only 소스 병렬 폴링 구현 가이드 v3</footer>
+</main>
+</div>
+
+<script>
+document.querySelectorAll('button.copy').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var pre = btn.closest('.codewrap').querySelector('pre');
+    var text = pre ? pre.innerText : '';
+    var done = function (ok) {
+      var old = '복사';
+      btn.textContent = ok ? '복사됨' : '복사 실패';
+      setTimeout(function () { btn.textContent = old; }, 1500);
+    };
+    try {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+    } catch (e) { done(false); }
+  });
+});
+</script>
+</body>
+</html>

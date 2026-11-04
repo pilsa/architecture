@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>범위 청크와 리스 동작 원리</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: 한 줄 기둥(본문 폭 ~68ch) 위에 비유 → 개념 → 흐름 → 장애 시나리오 순으로 내려가는 해설서.
+   상태(대기/처리 중/완료/거부)는 칩 색으로, 시간 흐름은 세로 타임라인으로 표현한다. */
+:root {
+  --bg: #f4f6f7;
+  --surface: #ffffff;
+  --ink: #17232b;
+  --muted: #5a6b75;
+  --line: #d6dee2;
+  --accent: #0f6b77;
+  --accent-soft: #e1f0f1;
+  --ready: #6b7a83;   --ready-bg: #eceff1;
+  --claimed: #a35a00; --claimed-bg: #fdf0dc;
+  --done: #1d7a46;    --done-bg: #e2f3e8;
+  --fail: #b3261e;    --fail-bg: #fbe5e3;
+  --font-display: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --font-body: "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1619; --surface: #172126; --ink: #e3eaed; --muted: #93a4ad; --line: #2b3a41;
+    --accent: #5cc3cf; --accent-soft: #15343a;
+    --ready: #a3b1b8; --ready-bg: #243137;
+    --claimed: #f0b45c; --claimed-bg: #3a2c15;
+    --done: #6fd39a; --done-bg: #143223;
+    --fail: #f2847b; --fail-bg: #3b1a18;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1619; --surface: #172126; --ink: #e3eaed; --muted: #93a4ad; --line: #2b3a41;
+  --accent: #5cc3cf; --accent-soft: #15343a;
+  --ready: #a3b1b8; --ready-bg: #243137;
+  --claimed: #f0b45c; --claimed-bg: #3a2c15;
+  --done: #6fd39a; --done-bg: #143223;
+  --fail: #f2847b; --fail-bg: #3b1a18;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 16.5px; line-height: 1.75;
+  word-break: keep-all; overflow-wrap: anywhere;
+}
+main { max-width: 860px; margin: 0 auto; padding: 48px 20px 80px; display: grid; gap: 28px; }
+
+header.top { display: grid; gap: 12px; padding-bottom: 8px; }
+.kicker { font-family: var(--font-mono); font-size: 13px; color: var(--accent); letter-spacing: .02em; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; line-height: 1.35; margin: 0; }
+h1 { font-size: clamp(28px, 4.6vw, 40px); font-weight: 700; }
+h2 { font-size: 23px; font-weight: 700; display: flex; gap: 12px; align-items: baseline; }
+h2 .num { font-family: var(--font-mono); font-size: 15px; color: var(--accent); font-weight: 600; }
+h3 { font-size: 17.5px; font-weight: 700; }
+p { margin: 0; max-width: 68ch; }
+.lead { font-size: 18px; color: var(--muted); }
+
+.summary {
+  background: var(--accent-soft); border-left: 4px solid var(--accent);
+  padding: 18px 22px; border-radius: 0 10px 10px 0; font-size: 18px; font-weight: 500;
+}
+
+section.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 28px clamp(18px, 4vw, 34px); display: grid; gap: 18px;
+}
+.stack { display: grid; gap: 10px; }
+
+code, .mono { font-family: var(--font-mono); font-size: .88em; }
+code { background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; min-width: 520px; font-size: 15px; }
+th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { background: var(--bg); font-weight: 700; font-size: 13.5px; color: var(--muted); }
+tr:last-child td { border-bottom: none; }
+td.num, th.num { font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: 14px; }
+
+.chip {
+  display: inline-block; font-size: 13px; font-weight: 700; padding: 2px 10px; border-radius: 999px;
+  white-space: nowrap; line-height: 1.6;
+}
+.chip.ready   { color: var(--ready);   background: var(--ready-bg); }
+.chip.claimed { color: var(--claimed); background: var(--claimed-bg); }
+.chip.done    { color: var(--done);    background: var(--done-bg); }
+.chip.fail    { color: var(--fail);    background: var(--fail-bg); }
+
+/* 청크 띠 그림 */
+.ribbon { display: grid; gap: 8px; }
+.ribbon-bar { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
+.seg {
+  flex: 1 0 110px; border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px;
+  border: 1px solid var(--line); font-size: 14px;
+}
+.seg b { font-family: var(--font-display); font-size: 15px; }
+.seg span { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.seg.done    { background: var(--done-bg);    border-color: transparent; }
+.seg.claimed { background: var(--claimed-bg); border-color: transparent; }
+.seg.ready   { background: var(--ready-bg);   border-color: transparent; }
+.seg.future  { background: transparent; border-style: dashed; color: var(--muted); }
+.ribbon-axis { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); font-family: var(--font-mono); }
+
+/* 흐름 단계 */
+ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; counter-reset: step; }
+ol.steps li {
+  counter-increment: step; display: grid; grid-template-columns: 40px 1fr; gap: 14px;
+  align-items: start; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px;
+}
+ol.steps li::before {
+  content: counter(step); width: 32px; height: 32px; border-radius: 50%;
+  background: var(--accent); color: var(--surface); display: grid; place-items: center;
+  font-family: var(--font-mono); font-weight: 600; font-size: 15px;
+}
+ol.steps .who { font-family: var(--font-mono); font-size: 13px; color: var(--accent); font-weight: 600; }
+ol.steps ul { margin: 6px 0 0; padding-left: 20px; }
+.loop-note { font-size: 14.5px; color: var(--muted); }
+
+/* 시나리오 */
+.scenarios { display: grid; gap: 18px; }
+.scenario { border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: grid; gap: 14px; }
+.scenario .q { font-size: 14px; color: var(--muted); font-family: var(--font-mono); }
+.rule {
+  border-radius: 8px; padding: 12px 16px; background: var(--accent-soft); font-weight: 500;
+}
+
+ol.timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+ol.timeline li {
+  display: grid; grid-template-columns: 64px 18px 1fr; gap: 10px; align-items: start;
+  position: relative; padding-bottom: 12px;
+}
+ol.timeline li:last-child { padding-bottom: 0; }
+ol.timeline .t { font-family: var(--font-mono); font-size: 13.5px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
+ol.timeline .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--line); margin-top: 8px; justify-self: center; position: relative; }
+ol.timeline li:not(:last-child) .dot::after {
+  content: ""; position: absolute; left: 5px; top: 12px; width: 2px; height: calc(100% + 40px); background: var(--line);
+}
+ol.timeline li.ok .dot   { background: var(--done); }
+ol.timeline li.warn .dot { background: var(--claimed); }
+ol.timeline li.bad .dot  { background: var(--fail); }
+ol.timeline .ev { font-size: 15.5px; }
+ol.timeline .ev small { display: block; color: var(--muted); font-size: 14px; }
+
+.lanes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.lane { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 6px; font-size: 14.5px; }
+.lane .pod { font-family: var(--font-mono); font-weight: 600; font-size: 13.5px; }
+@media (max-width: 560px) { .lanes { grid-template-columns: 1fr; } }
+
+.compare td:first-child { font-weight: 700; }
+.compare tr.pick td { background: var(--accent-soft); }
+
+.takeaways { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.take { border-top: 4px solid var(--accent); background: var(--bg); border-radius: 0 0 10px 10px; padding: 16px; display: grid; gap: 6px; align-content: start; }
+.take .term { font-family: var(--font-display); font-weight: 700; font-size: 17px; }
+.take p { font-size: 15px; color: var(--muted); }
+@media (max-width: 700px) { .takeaways { grid-template-columns: 1fr; } }
+
+footer { font-size: 13.5px; color: var(--muted); text-align: left; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<main>
+
+<header class="top">
+  <div class="kicker">Read-Only 소스 병렬 폴링 · 쉬운 설명</div>
+  <h1>범위 청크와 리스 동작 원리</h1>
+  <p class="lead">여러 pod가 하나의 소스 테이블을 나눠 읽을 때, 중복 없이, 누락 없이, pod가 죽어도 이어서 처리하는 방법을 물류센터에 빗대어 설명합니다.</p>
+</header>
+
+<div class="summary">
+  소스 데이터를 번호표 붙은 작업 바구니로 나누고, 워커는 바구니를 하나씩 기한을 정해 빌려가서(리스) 처리한 뒤 반납합니다.
+</div>
+
+<section class="card" aria-labelledby="s1">
+  <h2 id="s1"><span class="num">01</span>비유: 택배 물류센터</h2>
+  <p>계속 택배가 들어오는 물류센터가 있고, 직원 여러 명이 함께 일한다고 생각해 보세요.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>물류센터</th><th>우리 시스템</th></tr></thead>
+      <tbody>
+        <tr><td>계속 들어오는 택배</td><td>소스 테이블에 쌓이는 행</td></tr>
+        <tr><td>택배를 1,000개씩 묶은 <b>바구니</b></td><td><b>청크</b>: “여기부터 여기까지”라는 범위</td></tr>
+        <tr><td>바구니를 만드는 <b>분류 담당자</b></td><td><b>Planner</b></td></tr>
+        <tr><td>바구니를 가져가 처리하는 <b>직원들</b></td><td><b>Worker</b>: 여러 pod의 여러 스레드</td></tr>
+        <tr><td>바구니 목록이 적힌 <b>화이트보드</b></td><td><code>poll_chunk</code> 테이블</td></tr>
+        <tr><td>“김씨가 10분 동안 가져감”이라는 <b>대여 기록</b></td><td><b>리스(lease)</b></td></tr>
+        <tr><td>대여할 때마다 새로 받는 <b>대여 번호</b></td><td><b>fencing token</b> (<code>lease_token</code>)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="s2">
+  <h2 id="s2"><span class="num">02</span>청크란?</h2>
+  <p>소스 테이블을 시간순으로 줄 세운 뒤, 일정한 크기로 잘라 놓은 구간입니다.</p>
+  <div class="ribbon" role="img" aria-label="소스 테이블을 청크 1부터 4까지 잘라 놓은 그림. 청크 1 완료, 2와 3 처리 중, 4 대기, 그 뒤는 아직 자르지 않음">
+    <div class="ribbon-bar">
+      <div class="seg done"><b>청크 1</b><span>1–1000</span></div>
+      <div class="seg claimed"><b>청크 2</b><span>1001–2000</span></div>
+      <div class="seg claimed"><b>청크 3</b><span>2001–3000</span></div>
+      <div class="seg ready"><b>청크 4</b><span>3001–3500</span></div>
+      <div class="seg future"><b>아직 안 자름</b><span>계속 증가 →</span></div>
+    </div>
+    <div class="ribbon-axis"><span>오래된 행</span><span>새 행</span></div>
+  </div>
+  <div class="stack">
+    <p><b>청크는 데이터를 복사한 것이 아니라 범위 정보만 담은 메모</b>입니다. 예를 들면 “08:00:00부터 08:00:03 사이의 행”입니다.</p>
+    <p>청크끼리는 <b>범위가 겹치지 않습니다</b>. 그래서 서로 다른 청크를 처리하는 워커들은 같은 행을 볼 일이 없습니다.</p>
+  </div>
+  <h3>화이트보드(<code>poll_chunk</code>)에 적힌 내용</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>청크</th><th>범위</th><th>상태</th><th>가져간 사람</th><th class="num">반납 기한</th><th class="num">대여 번호</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td class="num">1–1000</td><td><span class="chip done">완료</span></td><td>–</td><td class="num">–</td><td class="num">1</td></tr>
+        <tr><td>2</td><td class="num">1001–2000</td><td><span class="chip claimed">처리 중</span></td><td>pod-A</td><td class="num">10:05</td><td class="num">1</td></tr>
+        <tr><td>3</td><td class="num">2001–3000</td><td><span class="chip claimed">처리 중</span></td><td>pod-B</td><td class="num">10:06</td><td class="num">1</td></tr>
+        <tr><td>4</td><td class="num">3001–3500</td><td><span class="chip ready">대기</span></td><td>–</td><td class="num">–</td><td class="num">0</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="s3">
+  <h2 id="s3"><span class="num">03</span>리스란?</h2>
+  <p><b>리스는 기한이 있는 대여</b>입니다. 워커는 청크를 영원히 가져가지 않고, “<b>10분 동안</b> 내가 처리할게”라고 빌려갑니다. 이렇게 하는 이유는 pod가 죽는 경우 때문입니다.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>기한</th><th>pod-A가 청크 2를 가져간 뒤 죽으면</th><th>결과</th></tr></thead>
+      <tbody>
+        <tr><td>없음</td><td>청크 2가 영원히 “처리 중”으로 남음</td><td><span class="chip fail">누락</span></td></tr>
+        <tr><td>있음</td><td>10분이 지나도 완료되지 않은 청크는 다른 워커가 다시 가져감</td><td><span class="chip done">자동 복구</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="s4">
+  <h2 id="s4"><span class="num">04</span>전체 흐름</h2>
+  <ol class="steps">
+    <li><div><div class="who">Planner</div>“새 데이터가 1,000개 쌓였네” → 화이트보드에 청크 5를 추가합니다. 상태는 <span class="chip ready">대기</span>입니다.</div></li>
+    <li><div><div class="who">Worker</div>화이트보드에서 대기 중인 청크 하나를 집어 <span class="chip claimed">처리 중</span>으로 바꿉니다. 가져간 사람, 반납 기한, 대여 번호를 함께 기록합니다.</div></li>
+    <li><div><div class="who">Worker</div>소스 테이블에서 그 범위만 읽습니다.</div></li>
+    <li><div><div class="who">Worker · 하나의 트랜잭션</div>아래 세 가지를 한 번에 처리합니다.
+      <ul>
+        <li>멱등 테이블에 기록</li>
+        <li>아웃박스에 이벤트 저장</li>
+        <li>화이트보드의 청크를 <span class="chip done">완료</span>로 변경</li>
+      </ul></div></li>
+  </ol>
+  <p class="loop-note">처리가 끝나면 워커는 2단계로 돌아가 다음 청크를 가져갑니다.</p>
+</section>
+
+<section class="card" aria-labelledby="s5">
+  <h2 id="s5"><span class="num">05</span>동시성 문제를 막는 방법</h2>
+  <div class="scenarios">
+
+    <div class="scenario">
+      <div class="q">문제 1</div>
+      <h3>두 워커가 같은 청크를 동시에 집으면?</h3>
+      <p><code>FOR UPDATE SKIP LOCKED</code>가 막아 줍니다. 규칙은 이렇습니다.</p>
+      <div class="rule">누가 이미 손대고 있는 바구니는 기다리지 말고 건너뛰고, 다음 바구니를 집는다.</div>
+      <div class="lanes">
+        <div class="lane"><span class="pod">pod-A</span><span>청크 4를 잡음</span><span class="chip claimed">청크 4</span></div>
+        <div class="lane"><span class="pod">pod-B</span><span>청크 4는 잠겨 있어 건너뜀 → 청크 5를 잡음</span><span class="chip claimed">청크 5</span></div>
+        <div class="lane"><span class="pod">pod-C</span><span>4, 5 모두 잠겨 있어 건너뜀 → 청크 6을 잡음</span><span class="chip claimed">청크 6</span></div>
+      </div>
+      <p>서로 기다리지 않으니 <b>빠르고</b>, 같은 청크를 집지 않으니 <b>중복이 없습니다</b>.</p>
+    </div>
+
+    <div class="scenario">
+      <div class="q">문제 2</div>
+      <h3>pod가 처리 도중 죽으면?</h3>
+      <ol class="timeline">
+        <li class="warn"><span class="t">10:00</span><span class="dot"></span><span class="ev">pod-A가 청크 2를 가져감<small>반납 기한 10:10</small></span></li>
+        <li class="bad"><span class="t">10:03</span><span class="dot"></span><span class="ev">pod-A 죽음</span></li>
+        <li><span class="t">10:10</span><span class="dot"></span><span class="ev">반납 기한 지남</span></li>
+        <li class="ok"><span class="t">10:11</span><span class="dot"></span><span class="ev">pod-B가 기한 지난 청크 2를 다시 가져가 처음부터 처리</span></li>
+      </ol>
+      <p>소스가 append-only라서 <b>같은 범위를 다시 읽으면 같은 데이터가 나옵니다</b>. 그래서 처음부터 다시 처리해도 안전합니다.</p>
+    </div>
+
+    <div class="scenario">
+      <div class="q">문제 3</div>
+      <h3>죽은 줄 알았던 pod가 다시 살아나면? (좀비)</h3>
+      <p>가장 까다로운 경우입니다. <b>대여 번호(fencing token)</b>로 막습니다.</p>
+      <ol class="timeline">
+        <li class="warn"><span class="t">10:00</span><span class="dot"></span><span class="ev">pod-A가 청크 2를 가져감<small>대여 번호 1번</small></span></li>
+        <li class="warn"><span class="t">10:03</span><span class="dot"></span><span class="ev">pod-A가 멈춤<small>GC나 네트워크 문제 등. 죽은 것은 아님</small></span></li>
+        <li class="warn"><span class="t">10:11</span><span class="dot"></span><span class="ev">기한이 지나 pod-B가 청크 2를 다시 가져감<small>대여 번호 2번</small></span></li>
+        <li class="ok"><span class="t">10:12</span><span class="dot"></span><span class="ev">pod-B: “대여 번호 2번인 청크 2를 완료로 바꿔줘” → 성공</span></li>
+        <li class="bad"><span class="t">10:13</span><span class="dot"></span><span class="ev">pod-A가 깨어나 “대여 번호 1번인 청크 2를 완료로 바꿔줘” → 지금 번호는 2번이라 0건 변경 → 롤백<small>pod-A가 저장하려던 아웃박스 이벤트도 함께 취소됨</small></span></li>
+      </ol>
+      <div class="rule">청크 완료 처리와 아웃박스 저장은 하나의 트랜잭션입니다. 대여 번호가 틀리면 완료 처리가 실패하고, 아웃박스 저장도 같이 취소됩니다.</div>
+      <p>혹시 이 단계까지 뚫리더라도 <b>멱등 테이블</b>이 같은 행의 중복 저장을 한 번 더 막습니다. 안전장치가 두 겹입니다.</p>
+    </div>
+
+  </div>
+</section>
+
+<section class="card" aria-labelledby="s6">
+  <h2 id="s6"><span class="num">06</span>다른 방식과 비교</h2>
+  <div class="table-wrap">
+    <table class="compare">
+      <thead><tr><th>방식</th><th>비유</th><th>결과</th></tr></thead>
+      <tbody>
+        <tr><td>워커 하나가 커서 하나로 처리</td><td>직원 1명이 모든 택배 처리</td><td>느림. 그 사람이 쓰러지면 전부 멈춤</td></tr>
+        <tr><td>“짝수는 A, 홀수는 B”로 나눔</td><td>모든 직원이 택배 더미 전체를 뒤져서 자기 것만 고름</td><td>각자 전체를 훑어야 해서 낭비. 직원 수가 바뀌면 규칙을 다시 짜야 함</td></tr>
+        <tr class="pick"><td>범위 청크 + 리스</td><td>바구니로 나눠 놓고 손이 빈 사람이 가져감</td><td>빠름. 직원 수가 늘거나 줄어도 그대로 동작. 쓰러져도 자동 복구</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>특히 <b>pod 수가 바뀌어도 설정을 바꿀 필요가 없습니다</b>. pod가 늘면 바구니를 집는 손이 늘어날 뿐입니다.</p>
+</section>
+
+<section class="card" aria-labelledby="s7">
+  <h2 id="s7"><span class="num">07</span>기억할 세 가지</h2>
+  <div class="takeaways">
+    <div class="take"><div class="term">청크</div><p>겹치지 않는 범위. 같은 데이터를 두 번 읽지 않습니다.</p></div>
+    <div class="take"><div class="term">리스</div><p>기한 있는 대여. pod가 죽어도 자동으로 다시 처리됩니다.</p></div>
+    <div class="take"><div class="term">대여 번호 + 단일 트랜잭션</div><p>좀비 pod가 있어도 결과는 정확히 한 번만 반영됩니다.</p></div>
+  </div>
+</section>
+
+<footer>Read-Only 테이블 기반 병렬 폴링 아키텍처 설계 보조 자료 · PostgreSQL · MyBatis · Spring Boot · EKS</footer>
+</main>
+</body>
+</html>
