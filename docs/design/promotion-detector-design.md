@@ -1,4 +1,6 @@
-# 프로모션 디텍터 설계 (처리 흐름 · 테이블 설계)
+# 프로모션 디텍터 설계 v1 (처리 흐름 · 테이블 설계)
+
+> ⚠ 이 문서는 [promotion-detector-design-v2.md](promotion-detector-design-v2.md)로 대체되었다. 소급 백필, 프로모션 단위 연결 등은 v2에서 변경됨.
 
 > 기반 문서: `polling-design-v2.md`(범위 청크 + 리스 병렬 폴링). 이 문서는 그 위에 **프로모션 · 가입고객 · 다중 소스** 요구를 얹는다. 청크 분할/claim/fencing 세부는 기반 문서를 따른다.
 

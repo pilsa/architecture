@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>프로모션 디텍터 설계</title>
+<title>프로모션 디텍터 설계 v2 — 역할 분리 · 처리 흐름 · 테이블 모델링</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -143,500 +143,1114 @@ ol.steps > li::before { content: counter(s); width: 26px; height: 26px; border-r
 footer { font-size: 13px; color: var(--muted); }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
-/* diagram */
-.s-zone { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
-.s-zone.acc { fill: var(--accent-soft); stroke: var(--accent); }
-.s-box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
-.s-box.strong { stroke: var(--accent); stroke-width: 2; }
-.s-box.bf { fill: var(--warn-bg); stroke: var(--warn); }
-.s-box.ok { fill: var(--ok-bg); stroke: var(--ok); stroke-dasharray: 5 4; }
-.s-title { font-size: 15px; font-weight: 700; fill: var(--ink); }
-.s-t { font-size: 14px; font-weight: 700; fill: var(--ink); }
-.s-sub { font-size: 12.5px; fill: var(--muted); }
-.s-lab { font-size: 12px; fill: var(--muted); }
-.s-t.acc, .s-lab.acc { fill: var(--accent); }
-.s-t.warn { fill: var(--warn); }
-.s-t.ok { fill: var(--ok); }
-.s-line { stroke: var(--muted); stroke-width: 1.5; fill: none; }
-.s-line.acc { stroke: var(--accent); stroke-width: 2; }
-.s-arrowhead { fill: var(--muted); }
-.s-mark { stroke: var(--ink); stroke-width: 2; stroke-dasharray: 4 3; }
-.s-mark.acc { stroke: var(--accent); }
-.s-brk { fill: none; stroke-width: 2; }
-.s-brk.warn { stroke: var(--warn); }
-.s-brk.ok { stroke: var(--ok); }
+
+
 a { color: var(--accent); }
+h4.tbl { font-size: 17px; margin-top: 18px; padding-top: 16px; border-top: 1px dashed var(--line); }
+h3 + h4.tbl { border-top: none; padding-top: 0; }
+.tblmeta { display: grid; gap: 6px; font-size: 14.5px; }
+.tblmeta > div { display: grid; grid-template-columns: 48px 1fr; gap: 10px; align-items: baseline; }
+.tblmeta .chip { text-align: center; }
+.lead p { margin: 0; }
+section.card td, section.card th { overflow-wrap: normal; }
+section.card ul.plain li, section.card ol.plain li { max-width: 72ch; }
+
 </style>
 </head>
 <body>
 <div class="shell">
-
-<nav class="toc" aria-label="목차">
-  <div class="box">
-    <div class="label">목차</div>
-    <ol>
-      <li><a href="#premise"><span>00</span>전제와 가정</a></li>
-      <li><a href="#summary"><span>01</span>결론 요약</a></li>
-      <li><a href="#flow"><span>02</span>처리 흐름</a></li>
-      <li><a href="#filter"><span>03</span>비가입 고객 필터 전략</a></li>
-      <li><a href="#race"><span>04</span>신규 가입 경합과 백필</a></li>
-      <li><a href="#tables"><span>05</span>prm_db 테이블 설계</a></li>
-      <li><a href="#rdt"><span>06</span>rdt_db 요구사항</a></li>
-      <li><a href="#ops"><span>07</span>다중 pod 운영</a></li>
-      <li><a href="#metrics"><span>08</span>모니터링 지표</a></li>
-      <li><a href="#open"><span>09</span>확인 필요 사항</a></li>
-    </ol>
-  </div>
-</nav>
-
+<nav class="toc" aria-label="목차"><div class="box"><div class="label">목차</div><ol>
+<li><a href="#s01"><span>01</span>시스템 구성</a></li>
+<li><a href="#s02"><span>02</span>확정 사항</a></li>
+<li><a href="#s03"><span>03</span>역할과 책임 분리</a></li>
+<li><a href="#s04"><span>04</span>처리 흐름</a></li>
+<li><a href="#s05"><span>05</span>테이블 모델링</a></li>
+<li><a href="#s06"><span>06</span>기존 설계 변경 사항</a></li>
+<li><a href="#s07"><span>07</span>v1 대비 변경 요약</a></li>
+<li><a href="#s08"><span>08</span>확인 필요 사항</a></li>
+</ol></div></nav>
 <main>
-
 <header class="top">
-  <div class="kicker">설계서 · 프로모션 리워드 디텍터 · 다중 pod</div>
-  <h1>프로모션 디텍터 설계: 처리 흐름과 테이블 설계</h1>
-  <p class="lead">rdt_db(CDC 읽기 전용)의 소스 테이블을 폴링해 프로모션 가입고객의 적격 이벤트만 골라 prm_db의 멱등 테이블과 아웃박스에 정확히 한 번 넣습니다. 청크 분할·claim·fencing은 기존 <a href="polling-implementation-guide.html">범위 청크 + 리스 구현 가이드</a>를 따르고, 이 문서는 그 위에 <b>프로모션 · 가입고객 · 다중 소스</b> 요구를 얹습니다.</p>
-  <div class="meta"><span>PostgreSQL 기준</span><span>가입고객 300만</span><span>24시간 상시</span><span>EKS 다중 pod</span><span>작성 2026-11-05</span></div>
+  <div class="kicker">설계서 v2 · promotion-detector · promotion-provider</div>
+  <h1>프로모션 디텍터 설계 v2 — 역할 분리 · 처리 흐름 · 테이블 모델링</h1>
+  
+<div class="lead"><p>작성 2026-11-05. 이전 문서 <code>promotion-detector-design.md</code>(v1)를 대체한다.
+디텍터의 폴링 조회 동작(청크 분할, 리스, 워터마크)은 이 문서 범위에서 제외하며 <code>polling-design-v2.md</code>를 따른다.</p></div>
+
+
+  <div class="meta"><span>소스 테이블 1:1 디텍터</span><span>설정 캐시 · 가입 prm-db</span><span>소급 없음</span><span>작성 2026-11-05</span></div>
 </header>
+<section class="card" id="s01" aria-labelledby="h-s01">
+<h2 id="h-s01"><span class="num">01</span>시스템 구성</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>구성요소</th>
+<th>역할</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>rdt-db</strong></td>
+<td>CDC로 복제된 읽기 전용 DB. 소스 테이블(예: 고객일별평잔, 입출금거래내역)이 있다. 프로모션 가입자와 미가입자의 데이터가 섞여 있다</td>
+</tr>
+<tr>
+<td><strong>prm-db</strong></td>
+<td>프로모션, 리워드그룹, 리워드항목, 가입고객, 디텍터 설정, 멱등, 아웃박스 테이블. detector와 provider가 <strong>같이 사용</strong>한다</td>
+</tr>
+<tr>
+<td><strong>promotion-detector</strong></td>
+<td>소스 테이블을 읽고, 리워드 대상 이벤트를 골라 아웃박스에 넣는다. rdt-db에 접근하는 <strong>유일한</strong> 애플리케이션</td>
+</tr>
+<tr>
+<td><strong>promotion-provider</strong></td>
+<td>리워드 엔진. 아웃박스 메시지를 받아 누적·한도·산정·지급을 처리한다. rdt-db를 조회하지 않는다</td>
+</tr>
+<tr>
+<td><strong>admin</strong></td>
+<td>관리자가 프로모션, 리워드그룹, 디텍터 설정을 입력한다</td>
+</tr>
+<tr>
+<td><strong>가입 API</strong></td>
+<td>고객식별자 + 가입 프로모션을 받아 가입고객 테이블에 넣는다</td>
+</tr>
+</tbody>
+</table></div>
+<div class="codewrap"><div class="cap"><span></span><button class="copy" type="button">복사</button></div><pre><code>[admin] ──▶ 디텍터 설정 · 프로모션 · 리워드그룹 · 리워드항목 (prm-db)
+[가입 API] ──▶ 프로모션가입고객 (prm-db)
 
-<!-- 00 -->
-<section class="card" id="premise" aria-labelledby="h-premise">
-  <h2 id="h-premise"><span class="num">00</span>전제와 가정</h2>
-  <div class="table-wrap"><table>
-    <thead><tr><th>항목</th><th>내용</th></tr></thead>
-    <tbody>
-      <tr><td class="key"><b>rdt_db</b></td><td>CDC로 복제된 읽기 전용 DB. 소스 테이블마다 <code>created_at</code> 있음. 쓰기 불가. 인덱스 추가는 <b>요청하면 가능</b>하다고 가정</td></tr>
-      <tr><td class="key"><b>prm_db</b></td><td>프로모션, 가입고객, 멱등, 아웃박스 테이블. 디텍터가 C/R/U/D 가능</td></tr>
-      <tr><td class="key">규모</td><td>가입고객 300만, 프로모션 수십 개 수준, 고객 1명이 여러 프로모션에 가입 가능</td></tr>
-      <tr><td class="key">소스</td><td>프로모션마다 읽을 소스 테이블이 다르다. <b>여러 프로모션이 같은 소스를 공유할 수 있다</b></td></tr>
-      <tr><td class="key">데이터</td><td>소스에는 비가입 고객 행이 섞여 있다. 가입 비율은 소스마다 다르다</td></tr>
-      <tr><td class="key">운영</td><td>24시간 상시. 가입은 계속 늘어난다</td></tr>
-    </tbody>
-  </table></div>
-  <div class="callout warn">
-    <b class="t">설계 전체의 출발점</b>
-    <p>rdt_db와 prm_db는 서로 다른 DB라 <b>JOIN할 수 없습니다.</b> "소스 행이 가입고객의 것인가"를 판정하는 방법이 설계의 핵심입니다.</p>
-  </div>
+rdt-db ──읽기──▶ [promotion-detector] ──▶ 디텍터멱등내역 ──▶ 디텍터아웃박스 ──relay──▶ [promotion-provider]
+                     │  설정: 캐시                                                    │
+                     └─ 가입 조회: prm-db                                             └─▶ 수신내역 · 지급
+</code></pre></div>
 </section>
 
-<!-- 01 -->
-<section class="card" id="summary" aria-labelledby="h-summary">
-  <h2 id="h-summary"><span class="num">01</span>결론 요약</h2>
-  <div class="grid2">
-    <div class="tile"><div class="h">① 소스 테이블 단위로 스캔</div><p>프로모션 단위가 아니라 소스 단위로 한 번만 읽고, 그 소스를 쓰는 모든 프로모션에 결과를 나눠 줍니다. 프로모션 단위로 읽으면 같은 테이블을 N번 읽습니다.</p></div>
-    <div class="tile"><div class="h">② 청크 스캔 + 배치 가입 조회</div><p>약 1,000행 청크를 읽고 고객번호를 모아 <code>cust_no = ANY(:arr)</code> 1회로 판정합니다. 커버링 인덱스로 index-only scan, 청크당 수 ms입니다.</p></div>
-    <div class="tile"><div class="h">③ 고객 목록 캐시 미사용</div><p>300만 명은 메모리에 들어가지만, 캐시가 늦으면 신규 가입자 이벤트를 조용히 놓칩니다. DB 조회가 충분히 싸서 캐시의 이득보다 위험이 큽니다.</p></div>
-    <div class="tile"><div class="h">④ 가입 백필로 경합 차단</div><p>가입 커밋 직전에 처리된 청크에서 놓친 이벤트는 <code>[가입 유효시점, planned_hwm]</code> 구간만 고객번호로 다시 조회합니다. 시간 가정 없이 누락이 없습니다.</p></div>
-    <div class="tile"><div class="h">⑤ 멱등 키 = 프로모션 포함</div><p><code>(promo_id, source_id, source_pk)</code>. 소스 행 하나가 여러 프로모션의 리워드가 될 수 있습니다. 백필·재처리·재claim이 겹쳐도 중복 발행이 없습니다.</p></div>
-    <div class="tile"><div class="h">⑥ 소스별 전략 전환</div><p>가입 비율이 아주 낮은 소스만 예외로 "고객 주도 조회"로 바꿀 수 있게 <code>filter_strategy</code> 플래그를 둡니다.</p></div>
-  </div>
+<section class="card" id="s02" aria-labelledby="h-s02">
+<h2 id="h-s02"><span class="num">02</span>확정 사항</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>내용</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>디텍터는 <strong>소스 테이블과 1:1</strong>로 정의한다. 한 번 읽은 결과를 여러 프로모션·리워드그룹이 함께 쓴다</td>
+</tr>
+<tr>
+<td>2</td>
+<td>누적, 한도, 1인 1회, 횟수 조건은 <strong>리워드 엔진(provider)</strong>이 맡는다</td>
+</tr>
+<tr>
+<td>3</td>
+<td>리워드를 무엇으로 얼마나 줄지는 provider가 정한다. 디텍터는 <strong>산정에 필요한 값만</strong> 아웃박스로 넘긴다</td>
+</tr>
+<tr>
+<td>4</td>
+<td>아웃박스 입력 전 <strong>디텍터멱등내역</strong>에 먼저 INSERT를 시도해 중복을 막는다. PK는 <code>IDMPT_KEY VARCHAR(200)</code>이고 값은 소스 테이블의 비즈니스 설계에 따라 정한다</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>소급 처리는 없다.</strong> 가입하지 않은 상태에서 조회된 행은 지급 대상이 아니다</td>
+</tr>
+<tr>
+<td>6</td>
+<td>고객(가입) 필터는 <strong>prm-db 조회</strong>, 설정 정보는 <strong>캐시</strong>를 쓴다</td>
+</tr>
+</tbody>
+</table></div>
 </section>
 
-<!-- 02 -->
-<section class="card" id="flow" aria-labelledby="h-flow">
-  <h2 id="h-flow"><span class="num">02</span>처리 흐름</h2>
-
-  <div class="figure">
-    <svg viewBox="0 0 940 420" role="img" aria-label="디텍터 처리 흐름: rdt_db 소스를 Planner와 Worker가 청크로 읽고, prm_db에서 가입을 조회한 뒤 멱등과 아웃박스에 기록">
-      <defs>
-        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="s-arrowhead"/></marker>
-      </defs>
-      <!-- rdt_db -->
-      <rect x="20" y="40" width="210" height="340" rx="12" class="s-zone"/>
-      <text x="125" y="68" text-anchor="middle" class="s-title">rdt_db (읽기 전용, CDC)</text>
-      <rect x="40" y="95" width="170" height="54" rx="8" class="s-box"/>
-      <text x="125" y="118" text-anchor="middle" class="s-t">cdc_heartbeat</text>
-      <text x="125" y="137" text-anchor="middle" class="s-sub">안전 워터마크 기준</text>
-      <rect x="40" y="195" width="170" height="54" rx="8" class="s-box"/>
-      <text x="125" y="218" text-anchor="middle" class="s-t">소스 테이블 A, B, …</text>
-      <text x="125" y="237" text-anchor="middle" class="s-sub">idx (created_at, pk)</text>
-      <rect x="40" y="295" width="170" height="54" rx="8" class="s-box"/>
-      <text x="125" y="318" text-anchor="middle" class="s-t">같은 소스 테이블</text>
-      <text x="125" y="337" text-anchor="middle" class="s-sub">idx (cust_no, created_at)</text>
-
-      <!-- detector -->
-      <rect x="320" y="40" width="270" height="340" rx="12" class="s-zone acc"/>
-      <text x="455" y="68" text-anchor="middle" class="s-title">디텍터 (모든 pod 동일 구성)</text>
-      <rect x="340" y="90" width="230" height="64" rx="8" class="s-box"/>
-      <text x="455" y="115" text-anchor="middle" class="s-t">① Planner</text>
-      <text x="455" y="136" text-anchor="middle" class="s-sub">소스별 HWM → 청크 생성</text>
-      <rect x="340" y="172" width="230" height="100" rx="8" class="s-box strong"/>
-      <text x="455" y="197" text-anchor="middle" class="s-t">② Worker</text>
-      <text x="455" y="218" text-anchor="middle" class="s-sub">청크 claim → 범위 조회</text>
-      <text x="455" y="237" text-anchor="middle" class="s-sub">→ 가입 배치 조회 → 규칙 평가</text>
-      <text x="455" y="256" text-anchor="middle" class="s-sub">→ 단일 TX 커밋</text>
-      <rect x="340" y="290" width="230" height="64" rx="8" class="s-box"/>
-      <text x="455" y="315" text-anchor="middle" class="s-t">③ Backfill Worker</text>
-      <text x="455" y="336" text-anchor="middle" class="s-sub">신규 가입·프로모션 구간 보정</text>
-
-      <!-- prm_db -->
-      <rect x="680" y="40" width="240" height="340" rx="12" class="s-zone"/>
-      <text x="800" y="68" text-anchor="middle" class="s-title">prm_db</text>
-      <rect x="700" y="90" width="200" height="44" rx="8" class="s-box"/>
-      <text x="800" y="117" text-anchor="middle" class="s-t">poll_source · poll_chunk</text>
-      <rect x="700" y="146" width="200" height="44" rx="8" class="s-box"/>
-      <text x="800" y="173" text-anchor="middle" class="s-t">promotion · promo_source</text>
-      <rect x="700" y="202" width="200" height="44" rx="8" class="s-box strong"/>
-      <text x="800" y="229" text-anchor="middle" class="s-t">promo_customer</text>
-      <rect x="700" y="270" width="200" height="80" rx="8" class="s-box"/>
-      <text x="800" y="300" text-anchor="middle" class="s-t">reward_idem</text>
-      <text x="800" y="322" text-anchor="middle" class="s-t">+ outbox → Kafka</text>
-      <text x="800" y="340" text-anchor="middle" class="s-sub">멱등 · 정확히 한 번</text>
-
-      <!-- arrows: rdt → detector -->
-      <line x1="210" y1="122" x2="338" y2="122" class="s-line" marker-end="url(#ar)"/>
-      <text x="274" y="112" text-anchor="middle" class="s-lab">워터마크</text>
-      <line x1="210" y1="222" x2="338" y2="222" class="s-line" marker-end="url(#ar)"/>
-      <text x="274" y="212" text-anchor="middle" class="s-lab">청크 범위 조회</text>
-      <line x1="210" y1="322" x2="338" y2="322" class="s-line" marker-end="url(#ar)"/>
-      <text x="274" y="312" text-anchor="middle" class="s-lab">고객번호 조회</text>
-      <!-- detector → prm -->
-      <line x1="570" y1="112" x2="698" y2="112" class="s-line" marker-end="url(#ar)"/>
-      <text x="634" y="102" text-anchor="middle" class="s-lab">청크 등록·claim</text>
-      <line x1="570" y1="205" x2="698" y2="224" class="s-line acc" marker-end="url(#ar)"/>
-      <text x="630" y="200" text-anchor="middle" class="s-lab acc">가입 조회</text>
-      <line x1="570" y1="255" x2="698" y2="295" class="s-line acc" marker-end="url(#ar)"/>
-      <text x="625" y="262" text-anchor="middle" class="s-lab acc">단일 TX</text>
-      <line x1="570" y1="322" x2="698" y2="322" class="s-line" marker-end="url(#ar)"/>
-      <text x="634" y="342" text-anchor="middle" class="s-lab">보정 INSERT</text>
-    </svg>
-  </div>
-  <p class="fig-cap">조율(청크, 리스, 백필 대기열)은 전부 prm_db 행 잠금으로 합니다. 리더 선출이 없고 모든 pod가 같은 역할을 합니다.</p>
-
-  <h3>2.1 Planner: 소스 단위로 청크 생성</h3>
-  <ul class="plain">
-    <li><code>poll_source</code> 한 행 = rdt_db 소스 테이블 하나. 그 소스를 쓰는 활성 프로모션이 없으면 <code>enabled=false</code>로 멈춥니다.</li>
-    <li>청크 크기는 행 수 기준(기본 1,000)입니다. 꼬리를 따라갈 때는 1,000행이 안 돼도 300~500ms마다 청크를 끊습니다.</li>
-    <li>청크 경계의 상한은 <b>안전 워터마크</b>입니다.</li>
-  </ul>
-  <div class="callout">
-    <b class="t">CDC 환경의 안전 워터마크</b>
-    <p>rdt_db는 물리 복제가 아니라 CDC라서 기존 설계의 <code>pg_last_xact_replay_timestamp()</code>를 쓸 수 없습니다. 대신 원천 DB에 <code>cdc_heartbeat(ts)</code>를 1초마다 갱신하고 CDC로 같이 복제합니다.</p>
-    <p>CDC가 원천 커밋 순서대로 적용한다면 rdt_db에서 보이는 heartbeat보다 먼저 커밋된 원천 행은 모두 들어와 있습니다. <code>safe_ts = heartbeat.ts − safety_lag</code>이고, <code>safety_lag</code>는 원천 쓰기 TX 최대 지속시간 + 시계 오차보다 크게 잡습니다.</p>
-  </div>
-  <div class="callout warn">
-    <b class="t">확인 필요</b>
-    <p>CDC 도구가 테이블별 병렬 적용(순서 비보장)을 한다면 테이블마다 heartbeat를 두거나 적용 지연 지표를 대신 써야 합니다.</p>
-  </div>
-
-  <h3>2.2 Worker: 청크 처리</h3>
-  <ol class="steps">
-    <li><div><b>claim</b>: 기존 설계와 같습니다(<code>FOR UPDATE SKIP LOCKED</code>, <code>lease_token++</code>).</div></li>
-    <li><div><b>범위 조회</b>: <code>(created_at, pk…) &gt; :from AND &lt;= :to</code>. SELECT 컬럼은 <b>pk, created_at, cust_no, 규칙에 쓰는 컬럼만</b> 고릅니다. 프로모션 규칙이 참조하는 컬럼의 합집합으로 자동 계산합니다.</div></li>
-    <li><div><b>배치 가입 조회</b>(청크당 1회): 아래 쿼리. 커버링 인덱스 하나로 index-only scan이 됩니다.</div></li>
-    <li><div><b>규칙 평가</b>(앱 메모리): 프로모션 기간, 가입 유효구간, 행 단위 조건을 확인합니다.</div></li>
-    <li><div><b>커밋</b>(prm_db 단일 TX): <code>reward_idem</code> INSERT … ON CONFLICT DO NOTHING RETURNING → 새로 들어간 건만 <code>outbox</code> INSERT → <code>poll_chunk</code> DONE(<code>lease_token</code> 조건, 0행이면 롤백).</div></li>
-  </ol>
-  <div class="codewrap">
-    <div class="cap"><span>③ 가입 배치 조회 (prm_db)</span><button class="copy" type="button">복사</button></div>
-<pre><code>SELECT cust_no, promo_id, valid_from, valid_to
-FROM promo_customer
-WHERE cust_no  = ANY(:custNos)           -- 청크의 distinct 고객번호 (≤1,000)
-  AND promo_id = ANY(:promoIdsOfSource)  -- 이 소스를 쓰는 활성 프로모션 (앱 캐시)
-  AND status   = 'ACTIVE';</code></pre>
-  </div>
-
-  <div class="table-wrap"><table>
-    <thead><tr><th>④ 규칙 평가 항목</th><th>조건</th></tr></thead>
-    <tbody>
-      <tr><td class="key">프로모션 기간</td><td><code>promo.start_at &lt;= row.created_at &lt; promo.end_at</code></td></tr>
-      <tr><td class="key">가입 유효구간</td><td><code>valid_from &lt;= row.created_at &lt; coalesce(valid_to, ∞)</code> — 가입 이후, 탈퇴 이전 이벤트만</td></tr>
-      <tr><td class="key">행 단위 조건</td><td>거래유형, 금액 하한 등. 프로모션 설정의 제한된 조건식(동등, IN, 범위)</td></tr>
-      <tr><td class="key">누적 조건</td><td><span class="chip idle">디텍터 범위 밖</span> "3회 이상", "월 합계 10만원" 등은 리워드 엔진이 처리. 디텍터를 무상태로 두어야 재처리와 병렬화가 쉽습니다.</td></tr>
-    </tbody>
-  </table></div>
-  <p>가입자가 한 명도 없는 청크는 조회와 판정만 하고 바로 DONE 처리합니다.</p>
-
-  <h3>2.3 처리량 감각</h3>
-  <div class="grid3">
-    <div class="tile"><div class="h">20~50 ms</div><p>청크 1,000행 rdt_db 범위 조회. 대부분의 시간이 여기서 듭니다.</p></div>
-    <div class="tile"><div class="h">2~5 ms</div><p>prm_db 가입 배치 조회 1회 (index-only scan).</p></div>
-    <div class="tile"><div class="h">pod × 스레드</div><p>청크가 겹치지 않으므로 소스 하나도 여러 pod가 나눠 읽습니다. 한계는 rdt_db 읽기 부하와 적중 건 쓰기입니다.</p></div>
-  </div>
+<section class="card" id="s03" aria-labelledby="h-s03">
+<h2 id="h-s03"><span class="num">03</span>역할과 책임 분리</h2>
+<p><strong>기준: 행 하나만 보고 판단할 수 있으면 디텍터, 과거 이력이나 다른 행이 필요하면 provider.</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>책임</th>
+<th style="text-align: center;">detector</th>
+<th style="text-align: center;">provider</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>소스 읽기 (rdt-db)</td>
+<td style="text-align: center;">✅</td>
+<td style="text-align: center;">❌</td>
+</tr>
+<tr>
+<td>가입 여부 + <code>이벤트일시 ≥ 가입일시</code></td>
+<td style="text-align: center;">✅</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr>
+<td>프로모션 기간 · 트리거 유효기간 (이벤트일시 기준)</td>
+<td style="text-align: center;">✅</td>
+<td style="text-align: center;">지급 시점 재검증</td>
+</tr>
+<tr>
+<td>행 단위 조건 (금액 이상, 거래유형 일치 등)</td>
+<td style="text-align: center;">✅</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr>
+<td>요청 중복 방지</td>
+<td style="text-align: center;">✅ 디텍터멱등내역</td>
+<td style="text-align: center;">✅ 수신 멱등</td>
+</tr>
+<tr>
+<td>산정 입력값 전달</td>
+<td style="text-align: center;">✅ 페이로드</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr>
+<td>누적 · 한도 · 1인 1회 · 횟수</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;">✅</td>
+</tr>
+<tr>
+<td>같은 프로모션 내 그룹 간 배타 · 우선순위</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;">✅</td>
+</tr>
+<tr>
+<td>리워드항목 선택 · 금액 산정 · 재화 지급</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;">✅</td>
+</tr>
+<tr>
+<td>이벤트 순서 해석</td>
+<td style="text-align: center;">이벤트일시 · 원천순번 제공</td>
+<td style="text-align: center;">✅ 이벤트일시 기준 판단</td>
+</tr>
+</tbody>
+</table></div>
+<ul class="plain">
+<li><strong>디텍터는 상태를 갖지 않는다.</strong> 그래서 재처리, 병렬 처리, pod 확장이 단순하다.</li>
+<li><strong>provider는 조건을 통과한 요청만 받는다.</strong> 행 평가를 provider로 넘기면 고객일별평잔만으로도 매일 "가입자 수 × 그룹 수"만큼의 요청이 아웃박스를 지나간다.</li>
+<li><strong>조건 정의는 저장 위치로 나눈다.</strong> 관리자 화면에서는 리워드그룹 화면 한 곳에서 입력하되, 행 단위 조건은 디텍터트리거조건에, 누적·한도 조건은 리워드그룹(기존)에 저장한다.</li>
+</ul>
 </section>
 
-<!-- 03 -->
-<section class="card" id="filter" aria-labelledby="h-filter">
-  <h2 id="h-filter"><span class="num">03</span>비가입 고객 필터 전략</h2>
-  <div class="table-wrap"><table>
-    <thead><tr><th>전략</th><th>방식</th><th>장점</th><th>단점</th><th>채택</th></tr></thead>
-    <tbody>
-      <tr><td class="key"><b>A. 스캔 + 배치 조회</b></td><td>소스 청크를 전부 읽고 prm_db에 고객번호 배치 조회</td><td>단순. 가입 즉시 반영. 소스 인덱스는 <code>(created_at, pk)</code>만 필요</td><td>비가입 행도 읽음</td><td><span class="chip ok">기본</span></td></tr>
-      <tr><td class="key"><b>B. 메모리 캐시</b></td><td>pod마다 가입자 Set/Bitmap을 들고 필터</td><td>prm_db 조회 없음</td><td>갱신 지연 = 누락. pod 간 버전 불일치. 무효화 설계 필요</td><td><span class="chip bad">미채택</span></td></tr>
-      <tr><td class="key"><b>C. 고객 주도 조회</b></td><td><code>cust_no = ANY(:가입자) AND created_at 구간</code></td><td>가입자가 적으면 읽기량이 아주 작음</td><td>가입자가 많으면 IN 목록 폭발. <code>(cust_no, created_at)</code> 인덱스 필요</td><td><span class="chip warn">소스별 예외</span></td></tr>
-    </tbody>
-  </table></div>
-  <div class="grid3">
-    <div class="tile"><div class="h">A가 기본인 이유</div><p>배치 조회로 판정 비용을 청크당 쿼리 1회로 고정했습니다. 소스는 어차피 시간순으로 읽어야 하므로 비가입 행을 읽는 비용은 피하기 어렵습니다.</p></div>
-    <div class="tile"><div class="h">C로 바꾸는 기준</div><p>그 소스의 가입자가 수천 명 이하로 적고 유입량이 매우 커서 A의 읽기 비용이 문제일 때만. 청크·멱등·백필 구조는 그대로, 조회 쿼리만 바뀝니다.</p></div>
-    <div class="tile"><div class="h">B를 쓰지 않는 이유</div><p>캐시가 30초 늦으면 그동안 가입한 고객의 이벤트를 버립니다. 4장 백필의 전제("이후 청크는 최신 가입 정보로 조회")도 깨집니다.</p></div>
-  </div>
+<section class="card" id="s04" aria-labelledby="h-s04">
+<h2 id="h-s04"><span class="num">04</span>처리 흐름</h2>
+<h3>4.1 청크 처리 순서: 설정 → 행 평가 → 가입 조회</h3>
+<p>행 평가와 가입 확인은 둘 다 AND 조건이라 순서를 바꿔도 결과가 같다. 그래서 비용이 싼 쪽을 먼저 한다.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>단계</th>
+<th>위치</th>
+<th>비용</th>
+<th>내용</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>① 설정</td>
+<td>캐시</td>
+<td>0</td>
+<td>디텍터의 유효한 트리거 목록, 미리 컴파일한 조건, 트리거 → 프로모션 매핑</td>
+</tr>
+<tr>
+<td>② 행 평가</td>
+<td>메모리</td>
+<td>μs 단위</td>
+<td>행 × 트리거마다 조건을 평가해 후보 <code>(행, 트리거)</code>를 만든다. <strong>후보가 0건이면 종료</strong> (DB 조회 생략)</td>
+</tr>
+<tr>
+<td>③ 가입 조회</td>
+<td>prm-db</td>
+<td>1회</td>
+<td>후보 행의 고객번호 × 후보 프로모션만 조회</td>
+</tr>
+<tr>
+<td>④ 결합</td>
+<td>메모리</td>
+<td>μs 단위</td>
+<td><code>가입 상태 = ACTIVE</code> ∧ <code>이벤트일시 ≥ 가입일시</code> ∧ 프로모션 기간 ∧ 트리거 유효기간</td>
+</tr>
+<tr>
+<td>⑤ 기록</td>
+<td>prm-db 1 TX</td>
+<td>ms 단위</td>
+<td><code>(이벤트일시, 원천순번)</code> 순으로 정렬 → 디텍터멱등내역 INSERT(충돌 시 무시) → 성공한 건만 디텍터아웃박스 INSERT</td>
+</tr>
+</tbody>
+</table></div>
+<div class="codewrap"><div class="cap"><span>SQL</span><button class="copy" type="button">복사</button></div><pre><code>-- ③ 가입 조회 (후보만)
+SELECT CUST_NO, PRMT_ID, JOIN_DTM
+FROM PRMT_CUST
+WHERE CUST_NO = ANY(:candidateCusts)
+  AND PRMT_ID = ANY(:candidatePrmts)
+  AND STTS_CD = 'ACTIVE';
+</code></pre></div>
+<ul class="plain">
+<li><strong>조건을 소스 조회 SQL(WHERE)에 넣지 않는다.</strong> 행 하나를 여러 트리거가 함께 쓰므로, 조회 단계에서 거르면 다른 트리거의 대상 행까지 잘린다.</li>
+<li><strong>설정 캐시</strong>: 몇 초마다 <code>디텍터기본.설정버전</code>만 확인하고, 바뀌었을 때만 설정 전체를 다시 읽는다. 청크 하나를 처리하는 동안은 처리 시작 시점의 버전으로 고정한다.</li>
+</ul>
+<h3>4.2 예시 1: 고객일별평잔 (행 1개 → 2건)</h3>
+<ul class="plain">
+<li>조회된 행: 고객 C001, 평잔 2천만 원</li>
+<li>C001은 P1, P2에 가입되어 있다.</li>
+</ul>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>트리거</th>
+<th>리워드그룹</th>
+<th>조건</th>
+<th>평가</th>
+<th>가입</th>
+<th>결과</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>P1-GROUP1</td>
+<td>평잔 ≥ 100만</td>
+<td>통과</td>
+<td>P1 가입</td>
+<td><strong>아웃박스 1건</strong></td>
+</tr>
+<tr>
+<td>T2</td>
+<td>P2-GROUP1</td>
+<td>평잔 ≥ 1,000만</td>
+<td>통과</td>
+<td>P2 가입</td>
+<td><strong>아웃박스 1건</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>멱등키에 리워드그룹이 들어가므로 두 건이 서로 막히지 않는다.</p>
+<h3>4.3 예시 2: 입출금거래내역 (행 10개 → 3건)</h3>
+<ul class="plain">
+<li>고객 C002가 거래 10건. C002는 P3에 가입되어 있다.</li>
+</ul>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>트리거</th>
+<th>리워드그룹</th>
+<th>디텍터가 평가하는 조건</th>
+<th>provider가 판단하는 조건</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T3</td>
+<td>P3-GROUP1</td>
+<td>거래유형 = 일반출금 ∧ 금액 ≥ 1만</td>
+<td>—</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>P3-GROUP2</td>
+<td>거래유형 = 자동이체 ∧ 금액 ≥ 1만</td>
+<td>—</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>P3-GROUP3</td>
+<td>거래유형 = 입금</td>
+<td><strong>1건</strong> (1인 1회)</td>
+</tr>
+</tbody>
+</table></div>
+<ul class="plain">
+<li>각 조건에 맞는 거래가 1건씩이면 3건이 입력되고 7건은 탈락한다.</li>
+<li>입금이 2건이면 디텍터는 T5 요청을 2건 보내고, provider가 1인 1회 규칙으로 두 번째 요청을 <code>REJECTED</code>로 처리한다.</li>
+<li><strong>순서 보장 범위</strong>:<ul class="plain">
+<li>디텍터는 청크 안에서만 <code>(이벤트일시, 원천순번)</code> 순으로 입력한다.</li>
+<li>청크는 여러 pod가 병렬로 처리하므로, 청크 사이의 아웃박스 입력 순서는 거래 순서와 다를 수 있다.</li>
+<li>그래서 provider는 도착 순서가 아니라 페이로드의 이벤트일시와 원천순번으로 순서를 판단한다.</li>
+</ul>
+</li>
+<li>행 하나가 같은 프로모션의 그룹 여러 개를 통과하면 디텍터는 그룹마다 보낸다. 그중 무엇을 줄지(배타 규칙)는 provider가 정한다.</li>
+</ul>
+<h3>4.4 멱등키 규칙</h3>
+<div class="codewrap"><div class="cap"><span></span><button class="copy" type="button">복사</button></div><pre><code>IDMPT_KEY = {디텍터ID}|{소스 비즈니스키}|{리워드그룹ID}
+
+고객일별평잔   : D_AVGBAL|20261104|C001|P2-GROUP1        (기준일자 + 고객번호)
+입출금거래내역 : D_TXN|1002003004|20261105|000123|P3-GROUP1 (계좌 + 거래일자 + 거래일련번호)
+</code></pre></div>
+<ul class="plain">
+<li><strong>리워드그룹ID는 반드시 넣는다.</strong> 빠지면 예시 1의 두 번째 건이 멱등 충돌로 막힌다.</li>
+<li>소스 비즈니스키는 <code>디텍터필드.멱등키순서</code>로 정한 컬럼을 순서대로 이어 붙인다.</li>
+<li>합친 길이가 200자를 넘을 수 있으면 소스 비즈니스키 부분만 SHA-256(64자)으로 바꾼다.</li>
+<li><code>디텍터아웃박스.요청ID</code>와 <code>프로바이더수신내역.요청ID</code>도 같은 값을 쓴다. 원천 행 → 아웃박스 → 지급 결과를 키 하나로 추적할 수 있다.</li>
+</ul>
 </section>
 
-<!-- 04 -->
-<section class="card" id="race" aria-labelledby="h-race">
-  <h2 id="h-race"><span class="num">04</span>신규 가입 경합과 백필</h2>
-  <span><span class="chip bad">정확성 핵심</span></span>
+<section class="card" id="s05" aria-labelledby="h-s05">
+<h2 id="h-s05"><span class="num">05</span>테이블 모델링</h2>
+<h3>5.1 테이블 목록</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>영역</th>
+<th>테이블명</th>
+<th>역할</th>
+<th>쓰기</th>
+<th>읽기</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>디텍터 설정</td>
+<td>디텍터기본(DTCT_BASE)</td>
+<td>소스 테이블 1개 = 디텍터 1개 정의</td>
+<td>admin</td>
+<td>detector(캐시)</td>
+</tr>
+<tr>
+<td>디텍터 설정</td>
+<td>디텍터필드(DTCT_FLD)</td>
+<td>조건·페이로드·멱등키에 쓸 수 있는 소스 컬럼 목록</td>
+<td>admin</td>
+<td>detector(캐시)</td>
+</tr>
+<tr>
+<td>디텍터 설정</td>
+<td>디텍터트리거(DTCT_TRGR)</td>
+<td>디텍터와 리워드그룹 연결</td>
+<td>admin</td>
+<td>detector(캐시)</td>
+</tr>
+<tr>
+<td>디텍터 설정</td>
+<td>디텍터트리거조건(DTCT_TRGR_COND)</td>
+<td>트리거별 행 단위 조건</td>
+<td>admin</td>
+<td>detector(캐시)</td>
+</tr>
+<tr>
+<td>디텍터 설정</td>
+<td>디텍터설정이력(DTCT_CFG_HIST)</td>
+<td>설정 변경 이력</td>
+<td>admin</td>
+<td>운영·감사</td>
+</tr>
+<tr>
+<td>고객</td>
+<td>프로모션가입고객(PRMT_CUST)</td>
+<td>고객의 프로모션 가입 현재 상태</td>
+<td>가입 API</td>
+<td>detector(DB)</td>
+</tr>
+<tr>
+<td>고객</td>
+<td>프로모션가입고객이력(PRMT_CUST_HIST)</td>
+<td>가입·탈퇴 이력</td>
+<td>가입 API</td>
+<td>운영·감사</td>
+</tr>
+<tr>
+<td>연계</td>
+<td>디텍터멱등내역(DTCT_IDMPT_HIST)</td>
+<td>아웃박스 입력 전 중복 방지</td>
+<td>detector</td>
+<td>detector</td>
+</tr>
+<tr>
+<td>연계</td>
+<td>디텍터아웃박스(DTCT_OUTBOX)</td>
+<td>detector → provider 리워드 생성 요청</td>
+<td>detector</td>
+<td>relay</td>
+</tr>
+<tr>
+<td>연계</td>
+<td>프로바이더수신내역(PRVD_RCV_HIST)</td>
+<td>provider의 요청 수신·처리 결과</td>
+<td>provider</td>
+<td>provider</td>
+</tr>
+</tbody>
+</table></div>
 
-  <h3>4.1 문제</h3>
-  <div class="codewrap">
-    <div class="cap"><span>누락 시나리오</span></div>
-<pre><code>t1  Worker   : 청크 K(이벤트 created_at = 10:00:05) 가입 조회 → 고객 C 없음 → 버림
-t2  가입 서비스: 고객 C 가입 커밋 (valid_from = 10:00:00)</code></pre>
-  </div>
-  <p>고객 C의 10:00:05 이벤트는 리워드 대상인데 이미 버려졌습니다. 소급 가입(유효시점이 과거)이 허용되면 이 구간은 더 길어집니다.</p>
+<h3>5.2 디텍터 설정</h3>
+<h4 class="tbl">디텍터기본 (DTCT_BASE)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> 디텍터 하나를 정의한다. 디텍터와 소스 테이블은 1:1이다.</span></div><div><span class="chip idle">키</span><span> PK <code>DTCT_ID</code> · UK <code>(SRC_SCHM_NM, SRC_TBL_NM)</code></span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>디텍터ID (DTCT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>디텍터 식별자. 예: D_AVGBAL</td>
+</tr>
+<tr>
+<td>디텍터명 (DTCT_NM)</td>
+<td>VARCHAR(100)</td>
+<td>화면 표시명. 예: 고객일별평잔 디텍터</td>
+</tr>
+<tr>
+<td>소스스키마명 (SRC_SCHM_NM)</td>
+<td>VARCHAR(64)</td>
+<td>rdt-db 스키마</td>
+</tr>
+<tr>
+<td>소스테이블명 (SRC_TBL_NM)</td>
+<td>VARCHAR(64)</td>
+<td>rdt-db 소스 테이블</td>
+</tr>
+<tr>
+<td>고객식별자필드 (CUST_FLD)</td>
+<td>VARCHAR(64)</td>
+<td>소스의 고객번호 컬럼명</td>
+</tr>
+<tr>
+<td>이벤트일시필드 (EVT_DTM_FLD)</td>
+<td>VARCHAR(64)</td>
+<td>가입일시·기간 비교 기준 컬럼 (기준일자, 거래일시 등)</td>
+</tr>
+<tr>
+<td>상태코드 (STTS_CD)</td>
+<td>VARCHAR(16)</td>
+<td>DRAFT 작성중 / ACTIVE 운영 / PAUSED 중지</td>
+</tr>
+<tr>
+<td>설정버전 (CFG_VER)</td>
+<td>INT</td>
+<td>설정 저장 시 +1. 디텍터 캐시 갱신 신호</td>
+</tr>
+<tr>
+<td>변경자ID (CHG_ID)</td>
+<td>VARCHAR(64)</td>
+<td>마지막 변경 관리자</td>
+</tr>
+<tr>
+<td>변경일시 (CHG_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>마지막 변경 시각</td>
+</tr>
+</tbody>
+</table></div>
+<h4 class="tbl">디텍터필드 (DTCT_FLD)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> 디텍터가 쓸 수 있는 소스 컬럼의 허용 목록이다. 컬럼마다 조건, 페이로드, 멱등키, 정렬 중 어디에 쓰는지 지정한다.</span></div><div><span class="chip idle">키</span><span> PK <code>(DTCT_ID, FLD_NM)</code></span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>디텍터ID (DTCT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>소속 디텍터</td>
+</tr>
+<tr>
+<td>필드명 (FLD_NM)</td>
+<td>VARCHAR(64)</td>
+<td>소스 컬럼명. 예: AVG_BAL</td>
+</tr>
+<tr>
+<td>필드한글명 (FLD_KOR_NM)</td>
+<td>VARCHAR(100)</td>
+<td>화면 표시명. 예: 평잔금액</td>
+</tr>
+<tr>
+<td>데이터유형코드 (DATA_TP_CD)</td>
+<td>VARCHAR(16)</td>
+<td>STR / NUM / DATE / DTM</td>
+</tr>
+<tr>
+<td>조건사용여부 (COND_YN)</td>
+<td>CHAR(1)</td>
+<td>Y면 트리거 조건에 사용 가능</td>
+</tr>
+<tr>
+<td>페이로드여부 (PAYLOAD_YN)</td>
+<td>CHAR(1)</td>
+<td>Y면 아웃박스에 값 전달 (산정 입력값)</td>
+</tr>
+<tr>
+<td>멱등키순서 (IDMPT_KEY_ORD)</td>
+<td>SMALLINT</td>
+<td>소스 비즈니스키 구성 순서. NULL이면 미포함</td>
+</tr>
+<tr>
+<td>정렬순서 (SORT_ORD)</td>
+<td>SMALLINT</td>
+<td>청크 안 정렬 순서 (원천순번). NULL이면 미사용</td>
+</tr>
+</tbody>
+</table></div>
+<h4 class="tbl">디텍터트리거 (DTCT_TRGR)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> 디텍터와 리워드그룹을 연결한다. 한 번 읽은 행을 여러 리워드그룹에 나누는 단위다.</span></div><div><span class="chip idle">키</span><span> PK <code>TRGR_ID</code> · UK <code>(DTCT_ID, RWD_GRP_ID)</code> · IX <code>(DTCT_ID, PRMT_ID)</code></span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>트리거ID (TRGR_ID)</td>
+<td>VARCHAR(32)</td>
+<td>트리거 식별자</td>
+</tr>
+<tr>
+<td>디텍터ID (DTCT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>데이터를 읽는 디텍터</td>
+</tr>
+<tr>
+<td>리워드그룹ID (RWD_GRP_ID)</td>
+<td>VARCHAR(32)</td>
+<td>연결할 리워드그룹 (기존 테이블)</td>
+</tr>
+<tr>
+<td>프로모션ID (PRMT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>리워드그룹의 프로모션. 가입 조회용으로 중복 저장</td>
+</tr>
+<tr>
+<td>유효시작일시 (VALID_STRT_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>이 시각 이후 이벤트부터 대상</td>
+</tr>
+<tr>
+<td>유효종료일시 (VALID_END_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>이 시각 이후 이벤트는 제외. NULL이면 무기한</td>
+</tr>
+<tr>
+<td>상태코드 (STTS_CD)</td>
+<td>VARCHAR(16)</td>
+<td>ACTIVE 운영 / PAUSED 중지</td>
+</tr>
+<tr>
+<td>변경자ID (CHG_ID)</td>
+<td>VARCHAR(64)</td>
+<td>마지막 변경 관리자</td>
+</tr>
+<tr>
+<td>변경일시 (CHG_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>마지막 변경 시각</td>
+</tr>
+</tbody>
+</table></div>
+<h4 class="tbl">디텍터트리거조건 (DTCT_TRGR_COND)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> 트리거의 행 단위 조건이다. 조건이 여러 개면 모두 AND로 묶는다. 누적·한도 조건은 넣지 않는다.</span></div><div><span class="chip idle">키</span><span> PK <code>(TRGR_ID, COND_SEQ)</code></span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>트리거ID (TRGR_ID)</td>
+<td>VARCHAR(32)</td>
+<td>소속 트리거</td>
+</tr>
+<tr>
+<td>조건순번 (COND_SEQ)</td>
+<td>SMALLINT</td>
+<td>조건 순서</td>
+</tr>
+<tr>
+<td>필드명 (FLD_NM)</td>
+<td>VARCHAR(64)</td>
+<td>비교할 소스 컬럼. 조건사용여부 = Y인 필드만</td>
+</tr>
+<tr>
+<td>연산자코드 (OPR_CD)</td>
+<td>VARCHAR(8)</td>
+<td>EQ / NE / IN / NOT_IN / GE / GT / LE / LT / BETWEEN</td>
+</tr>
+<tr>
+<td>조건값 (COND_VAL)</td>
+<td>VARCHAR(500)</td>
+<td>비교값. IN은 콤마 목록, BETWEEN은 <code>최소,최대</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>예시 데이터:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>트리거ID</th>
+<th>디텍터ID</th>
+<th>리워드그룹ID</th>
+<th>조건</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>D_AVGBAL</td>
+<td>P1-GROUP1</td>
+<td>AVG_BAL GE 1000000</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>D_AVGBAL</td>
+<td>P2-GROUP1</td>
+<td>AVG_BAL GE 10000000</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>D_TXN</td>
+<td>P3-GROUP1</td>
+<td>TXN_TP EQ 일반출금 · TXN_AMT GE 10000</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>D_TXN</td>
+<td>P3-GROUP2</td>
+<td>TXN_TP EQ 자동이체 · TXN_AMT GE 10000</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>D_TXN</td>
+<td>P3-GROUP3</td>
+<td>TXN_TP EQ 입금</td>
+</tr>
+</tbody>
+</table></div>
+<h4 class="tbl">디텍터설정이력 (DTCT_CFG_HIST)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> 디텍터 설정을 저장할 때마다 전체 스냅샷을 남긴다. 어느 설정 버전으로 판정했는지 추적하는 데 쓴다.</span></div><div><span class="chip idle">키</span><span> PK <code>(DTCT_ID, CFG_VER)</code></span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>디텍터ID (DTCT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>대상 디텍터</td>
+</tr>
+<tr>
+<td>설정버전 (CFG_VER)</td>
+<td>INT</td>
+<td>저장 당시 버전</td>
+</tr>
+<tr>
+<td>설정스냅샷 (CFG_SNAPSHOT)</td>
+<td>JSONB</td>
+<td>기본·필드·트리거·조건 전체</td>
+</tr>
+<tr>
+<td>변경자ID (CHG_ID)</td>
+<td>VARCHAR(64)</td>
+<td>변경 관리자</td>
+</tr>
+<tr>
+<td>변경일시 (CHG_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>변경 시각</td>
+</tr>
+</tbody>
+</table></div>
 
-  <h3>4.2 해법: 가입 백필</h3>
-  <div class="figure">
-    <svg viewBox="0 0 900 230" role="img" aria-label="가입 백필 구간: valid_from부터 H까지는 백필이, H 이후는 정상 경로가 처리">
-      <defs>
-        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="s-arrowhead"/></marker>
-      </defs>
-      <line x1="30" y1="110" x2="870" y2="110" class="s-line" marker-end="url(#ar2)"/>
-      <text x="870" y="74" text-anchor="end" class="s-sub">소스 커서 키 (created_at, pk) →</text>
-      <!-- chunks -->
-      <rect x="60"  y="88" width="110" height="44" rx="4" class="s-box"/>
-      <rect x="180" y="88" width="110" height="44" rx="4" class="s-box bf"/>
-      <rect x="300" y="88" width="110" height="44" rx="4" class="s-box bf"/>
-      <rect x="420" y="88" width="110" height="44" rx="4" class="s-box bf"/>
-      <rect x="560" y="88" width="110" height="44" rx="4" class="s-box ok"/>
-      <rect x="680" y="88" width="110" height="44" rx="4" class="s-box ok"/>
-      <text x="115" y="115" text-anchor="middle" class="s-sub">처리 완료</text>
-      <text x="235" y="115" text-anchor="middle" class="s-sub">처리 완료</text>
-      <text x="355" y="115" text-anchor="middle" class="s-sub">처리 중</text>
-      <text x="475" y="115" text-anchor="middle" class="s-sub">대기</text>
-      <text x="615" y="115" text-anchor="middle" class="s-sub">미계획</text>
-      <text x="735" y="115" text-anchor="middle" class="s-sub">미계획</text>
-      <!-- markers -->
-      <line x1="192" y1="40" x2="192" y2="150" class="s-mark"/>
-      <text x="192" y="32" text-anchor="middle" class="s-t">valid_from</text>
-      <line x1="545" y1="40" x2="545" y2="150" class="s-mark acc"/>
-      <text x="545" y="32" text-anchor="middle" class="s-t acc">H = planned_hwm</text>
-      <!-- brackets -->
-      <path d="M192,165 L192,175 L542,175 L542,165" class="s-brk warn"/>
-      <text x="377" y="198" text-anchor="middle" class="s-t warn">백필이 고객번호로 다시 조회</text>
-      <text x="377" y="217" text-anchor="middle" class="s-sub">가입 조회가 가입 커밋 전에 일어났을 수 있는 구간</text>
-      <path d="M548,165 L548,175 L860,175 L860,165" class="s-brk ok"/>
-      <text x="704" y="198" text-anchor="middle" class="s-t ok">정상 경로가 처리</text>
-      <text x="704" y="217" text-anchor="middle" class="s-sub">H를 읽은 뒤 계획 → 가입 커밋 이후 조회</text>
-    </svg>
-  </div>
+<h3>5.3 고객</h3>
+<h4 class="tbl">프로모션가입고객 (PRMT_CUST)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> 고객의 프로모션 가입 현재 상태다. 가입 API가 쓰고, 디텍터가 가입 필터로 조회한다.</span></div><div><span class="chip idle">키</span><span> PK <code>(PRMT_ID, CUST_NO)</code> · UK <code>JOIN_REQ_ID</code> · <strong>UK <code>(CUST_NO, PRMT_ID) INCLUDE (STTS_CD, JOIN_DTM)</code></strong> — 디텍터 조회용 커버링 인덱스</span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>프로모션ID (PRMT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>가입한 프로모션</td>
+</tr>
+<tr>
+<td>고객번호 (CUST_NO)</td>
+<td>VARCHAR(20)</td>
+<td>고객식별자. 소스 테이블과 같은 형식</td>
+</tr>
+<tr>
+<td>상태코드 (STTS_CD)</td>
+<td>VARCHAR(8)</td>
+<td>ACTIVE 가입 / LEFT 탈퇴</td>
+</tr>
+<tr>
+<td>가입일시 (JOIN_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>DB now(). 이 시각 이후 이벤트만 대상 (소급 없음)</td>
+</tr>
+<tr>
+<td>탈퇴일시 (LEAVE_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>탈퇴 시각</td>
+</tr>
+<tr>
+<td>가입요청ID (JOIN_REQ_ID)</td>
+<td>VARCHAR(64)</td>
+<td>가입 API 중복 요청 방지</td>
+</tr>
+<tr>
+<td>가입채널코드 (JOIN_CHNL_CD)</td>
+<td>VARCHAR(16)</td>
+<td>가입 경로</td>
+</tr>
+<tr>
+<td>변경일시 (CHG_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>마지막 변경 시각</td>
+</tr>
+</tbody>
+</table></div>
+<p>설계 포인트:
+- 디텍터는 항상 "이 고객들이 어떤 프로모션에 가입했나"를 묻는다. 그래서 <code>CUST_NO</code>가 앞에 오는 인덱스가 핵심이다. INCLUDE로 상태와 가입일시를 인덱스에 담아 테이블을 읽지 않는 index-only scan이 되게 한다.
+- 가입이 계속 들어오므로 autovacuum을 공격적으로 설정한다. visibility map이 최신이어야 index-only scan이 유지된다.
+- 용량: 300만 명 × 평균 2~3개 = 600만~900만 행. 인덱스가 메모리에 올라가는 크기라 파티셔닝은 필요 없다.</p>
+<h4 class="tbl">프로모션가입고객이력 (PRMT_CUST_HIST)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> 가입·탈퇴·재가입 이력이다. 감사와 분쟁 대응에 쓴다. 디텍터는 읽지 않는다.</span></div><div><span class="chip idle">키</span><span> PK <code>HIST_ID</code> · IX <code>(CUST_NO, PRMT_ID)</code></span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>이력ID (HIST_ID)</td>
+<td>BIGSERIAL</td>
+<td>이력 식별자</td>
+</tr>
+<tr>
+<td>프로모션ID (PRMT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>대상 프로모션</td>
+</tr>
+<tr>
+<td>고객번호 (CUST_NO)</td>
+<td>VARCHAR(20)</td>
+<td>대상 고객</td>
+</tr>
+<tr>
+<td>처리구분코드 (ACT_CD)</td>
+<td>VARCHAR(8)</td>
+<td>JOIN 가입 / LEAVE 탈퇴 / REJOIN 재가입</td>
+</tr>
+<tr>
+<td>요청ID (REQ_ID)</td>
+<td>VARCHAR(64)</td>
+<td>API 요청 식별자</td>
+</tr>
+<tr>
+<td>등록일시 (REG_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>처리 시각</td>
+</tr>
+</tbody>
+</table></div>
 
-  <ol class="steps">
-    <li><div><code>promo_customer.bf_status</code>(기본 <code>'PENDING'</code>)를 둡니다. 가입 서비스는 평소대로 INSERT만 하면 됩니다.</div></li>
-    <li><div>Backfill Worker가 <code>bf_status='PENDING'</code> 행을 <code>FOR UPDATE SKIP LOCKED</code>로 가져옵니다. 부분 인덱스라 대상은 항상 작습니다.</div></li>
-    <li><div>그 프로모션의 소스마다 <code>H = poll_source.planned_hwm</code>을 읽습니다. <b>가입 행이 커밋된 뒤</b>에 읽은 값입니다.</div></li>
-    <li><div><code>valid_from &gt; H.created_at</code>이면 <span class="chip idle">SKIP</span> — 아직 청크가 없는 구간이라 정상 경로가 처리합니다.</div></li>
-    <li><div>아니면 rdt_db를 고객번호 인덱스로 조회하고 같은 규칙으로 평가 → 멱등/아웃박스 INSERT → <code>bf_status='DONE'</code>.</div></li>
-  </ol>
-  <div class="codewrap">
-    <div class="cap"><span>백필 조회 (rdt_db)</span><button class="copy" type="button">복사</button></div>
-<pre><code>SELECT pk..., created_at, cust_no, &lt;규칙 컬럼&gt;
-FROM src
-WHERE cust_no = :custNo
-  AND created_at &gt;= :validFrom
-  AND (created_at, pk...) &lt;= (:H)       -- 인덱스 (cust_no, created_at)
-ORDER BY created_at;</code></pre>
-  </div>
-
-  <div class="inv">
-    <div><p><b>H 이하 청크</b>: 가입 조회가 가입 커밋 전에 일어났을 수 있습니다 → 백필이 덮습니다.</p></div>
-    <div><p><b>H 초과 청크</b>: H를 읽은 뒤에 계획되므로, 그 청크의 가입 조회는 가입 커밋 이후에 일어납니다 → 정상 경로가 잡습니다.</p></div>
-    <div><p><b>겹치는 구간</b>은 둘 다 처리할 수 있지만 멱등 키가 중복 발행을 막습니다. 지연 시간이나 TX 지속시간에 대한 가정이 필요 없습니다.</p></div>
-  </div>
-
-  <div class="grid2">
-    <div class="tile"><div class="h">비용</div><p>일반 가입은 <code>valid_from ≈ 지금</code>이고 H는 safety_lag만큼 뒤에 있어 대부분 SKIP되거나 수 초 구간만 조회합니다. 하루 10만 건 가입이어도 초당 약 1.2회 인덱스 조회입니다.</p></div>
-    <div class="tile"><div class="h">고객번호 인덱스가 없으면</div><p>PENDING 가입을 소스별로 모아 <code>created_at &gt;= min(valid_from) AND cust_no = ANY(:묶음)</code>으로 범위 조회합니다. 소급 기간이 길면 비싸지므로 인덱스 요청을 선행 조건으로 둡니다.</p></div>
-  </div>
-
-  <h3>4.3 같은 패턴을 쓰는 다른 변경</h3>
-  <div class="table-wrap"><table>
-    <thead><tr><th>변경</th><th>처리</th></tr></thead>
-    <tbody>
-      <tr><td class="key">신규 프로모션 (기존 소스 공유)</td><td><code>start_at &lt; planned_hwm</code>이면 <code>promo_backfill(promo_id, source_id, from=start_at, to=H)</code> 생성 → <code>promo_scope</code>가 붙은 청크로 처리, 해당 프로모션만 평가</td></tr>
-      <tr><td class="key">신규 프로모션 (새 소스)</td><td><code>poll_source</code> 생성, <code>planned_hwm = (start_at, '', …)</code></td></tr>
-      <tr><td class="key">프로모션 종료</td><td><code>end_at</code> 이후 이벤트는 규칙에서 제외. 활성 프로모션이 없는 소스는 HWM이 <code>end_at</code>을 넘은 뒤 <code>enabled=false</code></td></tr>
-      <tr><td class="key">탈퇴</td><td><code>valid_to</code> 설정 → 이후 이벤트 제외. 이미 발행된 건은 리워드 엔진 정책</td></tr>
-    </tbody>
-  </table></div>
-  <p>프로모션 설정은 앱에서 캐시합니다. 자주 바뀌지 않고, 바뀔 때는 위 백필이 공백을 메웁니다. 캐시에 <code>config_version</code>을 두고 청크 처리 시작 시점에 고정해 씁니다.</p>
+<h3>5.4 디텍터 ↔ provider 연계</h3>
+<h4 class="tbl">디텍터멱등내역 (DTCT_IDMPT_HIST)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> 아웃박스에 넣기 전 먼저 INSERT를 시도해 같은 요청이 두 번 나가지 않게 막는다. 충돌하면 그 건은 건너뛴다.</span></div><div><span class="chip idle">키</span><span> PK <code>IDMPT_KEY</code> · 등록월 기준 파티션 (보관 기간이 지나면 파티션 삭제)</span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>멱등키 (IDMPT_KEY)</td>
+<td>VARCHAR(200)</td>
+<td><code>{디텍터ID}|{소스 비즈니스키}|{리워드그룹ID}</code></td>
+</tr>
+<tr>
+<td>디텍터ID (DTCT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>생성한 디텍터</td>
+</tr>
+<tr>
+<td>트리거ID (TRGR_ID)</td>
+<td>VARCHAR(32)</td>
+<td>통과한 트리거</td>
+</tr>
+<tr>
+<td>고객번호 (CUST_NO)</td>
+<td>VARCHAR(20)</td>
+<td>대상 고객</td>
+</tr>
+<tr>
+<td>이벤트일시 (EVT_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>소스 이벤트 시각</td>
+</tr>
+<tr>
+<td>등록일시 (REG_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>INSERT 시각</td>
+</tr>
+</tbody>
+</table></div>
+<h4 class="tbl">디텍터아웃박스 (DTCT_OUTBOX)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> detector → provider 리워드 생성 요청이다. <strong>1행 = 소스 행 1개 × 리워드그룹 1개.</strong> 기존 relay가 발행한다.</span></div><div><span class="chip idle">키</span><span> PK <code>OUTBOX_ID</code> · UK <code>REQ_ID</code> · 발행 대기 부분 인덱스 · 등록월 기준 파티션</span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>아웃박스ID (OUTBOX_ID)</td>
+<td>BIGSERIAL</td>
+<td>발행 순서 식별자</td>
+</tr>
+<tr>
+<td>요청ID (REQ_ID)</td>
+<td>VARCHAR(200)</td>
+<td>= 멱등키. provider 수신 멱등 키</td>
+</tr>
+<tr>
+<td>프로모션ID (PRMT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>대상 프로모션</td>
+</tr>
+<tr>
+<td>리워드그룹ID (RWD_GRP_ID)</td>
+<td>VARCHAR(32)</td>
+<td>대상 리워드그룹</td>
+</tr>
+<tr>
+<td>고객번호 (CUST_NO)</td>
+<td>VARCHAR(20)</td>
+<td>대상 고객. 메시지 키로 써서 고객별 순서 유지</td>
+</tr>
+<tr>
+<td>디텍터ID (DTCT_ID)</td>
+<td>VARCHAR(32)</td>
+<td>생성한 디텍터</td>
+</tr>
+<tr>
+<td>트리거ID (TRGR_ID)</td>
+<td>VARCHAR(32)</td>
+<td>통과한 트리거</td>
+</tr>
+<tr>
+<td>이벤트일시 (EVT_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>provider 순서 판단 기준</td>
+</tr>
+<tr>
+<td>원천순번 (SRC_SEQ)</td>
+<td>VARCHAR(100)</td>
+<td>같은 시각 이벤트의 순서 (거래일련번호 등)</td>
+</tr>
+<tr>
+<td>소스비즈니스키 (SRC_BIZ_KEY)</td>
+<td>VARCHAR(150)</td>
+<td>원천 행 추적용</td>
+</tr>
+<tr>
+<td>페이로드 (PAYLOAD)</td>
+<td>JSONB</td>
+<td>산정 입력값. 예: <code>{"AVG_BAL": 20000000}</code></td>
+</tr>
+<tr>
+<td>설정버전 (CFG_VER)</td>
+<td>INT</td>
+<td>판정에 쓴 디텍터 설정 버전</td>
+</tr>
+<tr>
+<td>발행상태코드 (PUB_STTS_CD)</td>
+<td>VARCHAR(8)</td>
+<td>READY / SENT (기존 relay 방식)</td>
+</tr>
+<tr>
+<td>등록일시 (REG_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>INSERT 시각</td>
+</tr>
+</tbody>
+</table></div>
+<h4 class="tbl">프로바이더수신내역 (PRVD_RCV_HIST)</h4>
+<div class="tblmeta"><div><span class="chip acc">역할</span><span> provider가 요청을 받고 처리한 결과다. 메시지가 중복으로 와도(at-least-once) 한 번만 처리하게 막고, 지급하지 않은 사유를 남긴다.</span></div><div><span class="chip idle">키</span><span> PK <code>REQ_ID</code></span></div></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>컬럼</th>
+<th>타입</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>요청ID (REQ_ID)</td>
+<td>VARCHAR(200)</td>
+<td>= 디텍터아웃박스.요청ID</td>
+</tr>
+<tr>
+<td>리워드그룹ID (RWD_GRP_ID)</td>
+<td>VARCHAR(32)</td>
+<td>대상 리워드그룹</td>
+</tr>
+<tr>
+<td>고객번호 (CUST_NO)</td>
+<td>VARCHAR(20)</td>
+<td>대상 고객</td>
+</tr>
+<tr>
+<td>이벤트일시 (EVT_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>소스 이벤트 시각</td>
+</tr>
+<tr>
+<td>처리상태코드 (PRCS_STTS_CD)</td>
+<td>VARCHAR(16)</td>
+<td>PAID 지급 / REJECTED 미지급 / ERROR 오류</td>
+</tr>
+<tr>
+<td>거절사유코드 (RJCT_RSN_CD)</td>
+<td>VARCHAR(32)</td>
+<td>한도 초과, 1인 1회 중복, 기간 종료 등</td>
+</tr>
+<tr>
+<td>처리일시 (PRCS_DTM)</td>
+<td>TIMESTAMPTZ</td>
+<td>처리 시각</td>
+</tr>
+</tbody>
+</table></div>
+<div class="callout"><p>디텍터멱등내역과 디텍터아웃박스는 항상 1:1로 쌓이므로 하나로 합치면 쓰기 1회를 줄일 수 있다. 확정 설계(멱등 가드 후 아웃박스 입력)에 따라 분리를 유지한다.</p></div>
 </section>
 
-<!-- 05 -->
-<section class="card" id="tables" aria-labelledby="h-tables">
-  <h2 id="h-tables"><span class="num">05</span>prm_db 테이블 설계</h2>
-
-  <div class="table-wrap"><table>
-    <thead><tr><th>테이블</th><th>역할</th><th>구분</th></tr></thead>
-    <tbody>
-      <tr><td class="mono">promotion</td><td>프로모션 기간, 상태, 소급 허용 여부</td><td><span class="chip acc">설정</span></td></tr>
-      <tr><td class="mono">promo_source</td><td>프로모션 ↔ 소스 매핑 + 행 단위 규칙</td><td><span class="chip acc">설정</span></td></tr>
-      <tr><td class="mono">promo_customer</td><td>가입고객. <b>디텍터 조회용 커버링 인덱스</b> + 백필 대기열</td><td><span class="chip ok">조회 중심</span></td></tr>
-      <tr><td class="mono">poll_source / poll_chunk</td><td>소스별 HWM, 청크와 리스 (기존 설계 + 컬럼 추가)</td><td><span class="chip idle">조율</span></td></tr>
-      <tr><td class="mono">promo_backfill</td><td>신규 프로모션 소급 구간</td><td><span class="chip idle">조율</span></td></tr>
-      <tr><td class="mono">reward_idem / outbox</td><td>멱등 키, 발행 메시지</td><td><span class="chip warn">결과</span></td></tr>
-    </tbody>
-  </table></div>
-
-  <h3>5.1 프로모션 설정</h3>
-  <div class="codewrap">
-    <div class="cap"><span>promotion, promo_source</span><button class="copy" type="button">복사</button></div>
-<pre><code>CREATE TABLE promotion (
-  promo_id      varchar(32) PRIMARY KEY,
-  name          varchar(200) NOT NULL,
-  start_at      timestamptz NOT NULL,
-  end_at        timestamptz NOT NULL,
-  status        varchar(16)  NOT NULL,              -- READY|ACTIVE|ENDED
-  retro_allowed boolean      NOT NULL DEFAULT false, -- 소급 가입 허용 여부
-  updated_at    timestamptz  NOT NULL DEFAULT now()
-);
-
-CREATE TABLE promo_source (
-  promo_id   varchar(32) REFERENCES promotion,
-  source_id  varchar(64) REFERENCES poll_source,
-  rule_json  jsonb NOT NULL,   -- 예: {"txn_type":["PAY"],"amount_gte":10000}
-  PRIMARY KEY (promo_id, source_id)
-);
-CREATE INDEX ix_promo_source_src ON promo_source (source_id);</code></pre>
-  </div>
-  <p>규칙은 디텍터가 해석할 수 있는 제한된 조건식(동등, IN, 범위)만 허용합니다. 임의 SQL은 받지 않습니다.</p>
-
-  <h3>5.2 가입고객: 조회 중심 설계</h3>
-  <div class="codewrap">
-    <div class="cap"><span>promo_customer</span><button class="copy" type="button">복사</button></div>
-<pre><code>CREATE TABLE promo_customer (
-  promo_id    varchar(32) NOT NULL,
-  cust_no     varchar(20) NOT NULL,   -- 소스의 고객번호와 같은 타입·형식
-  valid_from  timestamptz NOT NULL,   -- 리워드 대상 시작 (보통 가입 시각, DB now())
-  valid_to    timestamptz,            -- 탈퇴 시각, NULL = 유지
-  status      varchar(8)  NOT NULL DEFAULT 'ACTIVE',
-  bf_status   varchar(8)  NOT NULL DEFAULT 'PENDING',  -- PENDING|DONE|SKIP
-  joined_at   timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (promo_id, cust_no)     -- 업무 조회: 프로모션별 가입자 목록
-);
-
--- 디텍터 전용: 고객번호 → 가입 프로모션 (index-only scan)
-CREATE UNIQUE INDEX ux_pc_detect
-  ON promo_customer (cust_no, promo_id)
-  INCLUDE (valid_from, valid_to, status);
-
--- 백필 대기열 (항상 작음)
-CREATE INDEX ix_pc_bf_pending
-  ON promo_customer (joined_at)
-  WHERE bf_status = 'PENDING';</code></pre>
-  </div>
-
-  <div class="grid2">
-    <div class="tile"><div class="h">선두 컬럼이 cust_no인 인덱스</div><p>디텍터의 질문은 항상 "이 고객들이 어떤 프로모션에 가입했나"입니다. PK <code>(promo_id, cust_no)</code>만 있으면 <code>cust_no = ANY</code> 조회가 프로모션 수만큼 인덱스를 훑습니다.</p></div>
-    <div class="tile"><div class="h">INCLUDE로 테이블 접근 제거</div><p>규칙 평가에 필요한 유효구간·상태가 인덱스에 있어 heap을 읽지 않습니다. visibility map이 최신이어야 하므로 autovacuum을 공격적으로 둡니다(<code>autovacuum_vacuum_insert_scale_factor</code> 낮춤).</p></div>
-    <div class="tile"><div class="h">고객 × 프로모션 = 1행 (정규화)</div><p>고객 1행에 <code>promo_ids[]</code> 배열로 두면 가입/탈퇴마다 같은 행을 갱신해 경합과 bloat가 생기고, 프로모션별 유효구간 표현이 어렵습니다.</p></div>
-    <div class="tile"><div class="h">용량</div><p>300만 × 평균 2~3개 = 600만~900만 행. heap 약 0.6~0.9GB, 디텍터 인덱스 약 0.4~0.6GB. 메모리에 올라가는 크기라 파티셔닝 불필요. 수천만 행을 넘기면 <code>cust_no</code> 해시 파티션(8~16개).</p></div>
-  </div>
-  <div class="callout warn">
-    <b class="t">고객번호 형식은 소스와 완전히 같게</b>
-    <p>타입, 자릿수, 앞자리 0 처리가 다르면 조회가 조용히 빗나갑니다. 소스마다 형식이 다르면 소스 설정에 정규화 함수를 지정합니다. <code>valid_from</code>은 앱 시각이 아닌 DB <code>now()</code>로 넣고, 소급 가입일 때만 과거 값을 허용합니다.</p>
-  </div>
-
-  <h3>5.3 조율 테이블 (기존 설계에 추가)</h3>
-  <div class="codewrap">
-    <div class="cap"><span>poll_source, poll_chunk 추가 컬럼 · promo_backfill</span><button class="copy" type="button">복사</button></div>
-<pre><code>ALTER TABLE poll_source
-  ADD COLUMN filter_strategy varchar(16) NOT NULL DEFAULT 'SCAN';  -- SCAN|CUSTOMER
-
-ALTER TABLE poll_chunk
-  ADD COLUMN promo_scope varchar(32);   -- NULL=정상 청크, 값=해당 프로모션 백필 청크
-
-CREATE TABLE promo_backfill (
-  backfill_id  bigserial PRIMARY KEY,
-  promo_id     varchar(32) NOT NULL,
-  source_id    varchar(64) NOT NULL,
-  from_key     text[] NOT NULL,
-  to_key       text[] NOT NULL,          -- 생성 시점의 planned_hwm
-  status       varchar(16) NOT NULL DEFAULT 'READY',  -- READY|PLANNED|DONE
-  created_at   timestamptz NOT NULL DEFAULT now()
-);</code></pre>
-  </div>
-  <p>Planner가 <code>promo_backfill</code> 구간을 <code>promo_scope</code>가 붙은 청크로 잘라 넣고, 워커는 같은 경로로 처리하되 그 프로모션만 평가합니다. 정상 처리 지연을 막기 위해 백필 청크의 <code>max_pending</code>을 따로 둡니다.</p>
-
-  <h3>5.4 멱등 · 아웃박스</h3>
-  <div class="codewrap">
-    <div class="cap"><span>reward_idem</span><button class="copy" type="button">복사</button></div>
-<pre><code>CREATE TABLE reward_idem (
-  promo_id     varchar(32) NOT NULL,
-  source_id    varchar(64) NOT NULL,
-  source_key   text        NOT NULL,   -- 소스 PK 값의 JSON 배열 인코딩
-  cust_no      varchar(20) NOT NULL,
-  event_at     timestamptz NOT NULL,   -- 소스 created_at
-  created_at   timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (promo_id, source_id, source_key)
-) PARTITION BY LIST (promo_id);        -- 프로모션 종료 후 파티션 단위 정리</code></pre>
-  </div>
-  <ul class="plain">
-    <li>파티션 키가 <code>promo_id</code>라 프로모션이 끝나고 보관 기간이 지나면 <code>DETACH/DROP</code> 한 번으로 정리됩니다. 아주 큰 프로모션은 <code>event_at</code> 월 단위 하위 파티션을 씁니다.</li>
-    <li>아웃박스는 기존 구현을 그대로 씁니다. 페이로드: <code>promo_id, cust_no, source_id, source_key, event_at</code> + 규칙 평가에 쓴 값.</li>
-    <li>메시지 키를 <code>cust_no</code>로 두면 Kafka 파티션 안에서 고객별 순서가 유지되어 리워드 엔진의 누적 계산이 쉬워집니다.</li>
-  </ul>
+<section class="card" id="s06" aria-labelledby="h-s06">
+<h2 id="h-s06"><span class="num">06</span>기존 설계 변경 사항</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>대상</th>
+<th>변경</th>
+<th>이유</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>리워드그룹</td>
+<td>행 단위 조건(금액 이상, 거래유형)이 있으면 디텍터트리거조건으로 옮긴다. 누적·한도·1회·배타 조건만 남긴다</td>
+<td>상태 없는 조건은 detector, 상태가 필요한 조건은 provider</td>
+</tr>
+<tr>
+<td>리워드그룹</td>
+<td>상태(중지) 컬럼이 없으면 추가한다. 중지하면 admin이 연결된 트리거도 PAUSED로 바꾼다</td>
+<td>중지된 그룹의 요청 생성 방지</td>
+</tr>
+<tr>
+<td>리워드항목</td>
+<td>산정 입력값 목록을 정의한다 (예: <code>AVG_BAL</code>)</td>
+<td>admin이 저장할 때 디텍터필드.페이로드여부와 대조해 검증</td>
+</tr>
+<tr>
+<td>프로모션</td>
+<td>기간(시작·종료)과 상태가 있는지 확인한다</td>
+<td>detector는 이벤트일시 기준, provider는 지급 시점 기준으로 검증</td>
+</tr>
+</tbody>
+</table></div>
+<h3>admin 저장 시 검증 항목</h3>
+<ul class="plain">
+<li>디텍터필드가 rdt-db 카탈로그의 실제 컬럼·타입과 일치하는지</li>
+<li>트리거조건의 필드가 조건사용여부 = Y이고, 조건값이 데이터유형으로 변환되는지</li>
+<li>리워드항목 산정 입력값이 모두 페이로드여부 = Y 필드에 있는지</li>
+<li>멱등키순서가 지정된 필드 조합이 소스 행을 유일하게 식별하는지</li>
+<li>저장할 때마다 설정버전 +1, 디텍터설정이력에 스냅샷 기록</li>
+</ul>
 </section>
 
-<!-- 06 -->
-<section class="card" id="rdt" aria-labelledby="h-rdt">
-  <h2 id="h-rdt"><span class="num">06</span>rdt_db 요구사항 (소스 소유팀 요청)</h2>
-  <div class="table-wrap"><table>
-    <thead><tr><th>항목</th><th>용도</th><th>구분</th></tr></thead>
-    <tbody>
-      <tr><td>소스별 인덱스 <code>(created_at, pk…)</code></td><td>청크 경계 계산, 범위 조회</td><td><span class="chip bad">필수</span></td></tr>
-      <tr><td>소스별 인덱스 <code>(cust_no, created_at)</code></td><td>가입 백필, 고객 주도 조회</td><td><span class="chip warn">강력 권장</span> 소급 가입이 있으면 필수</td></tr>
-      <tr><td><code>cdc_heartbeat</code> 복제</td><td>안전 워터마크</td><td><span class="chip bad">필수</span></td></tr>
-      <tr><td><code>created_at</code> NOT NULL, 불변, 원천 DB 시각</td><td>커서 정합성</td><td><span class="chip bad">필수</span></td></tr>
-      <tr><td>CDC 적용 순서 (커밋 순서 보장 여부)</td><td>워터마크 방식 결정</td><td><span class="chip idle">확인 필요</span></td></tr>
-      <tr><td>원천 쓰기 TX 최대 지속시간</td><td><code>safety_lag</code> 산정</td><td><span class="chip idle">확인 필요</span></td></tr>
-    </tbody>
-  </table></div>
+<section class="card" id="s07" aria-labelledby="h-s07">
+<h2 id="h-s07"><span class="num">07</span>v1 대비 변경 요약</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>항목</th>
+<th>v1</th>
+<th>v2</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>디텍터 연결 단위</td>
+<td>프로모션</td>
+<td><strong>리워드그룹 (트리거)</strong></td>
+</tr>
+<tr>
+<td>행 단위 조건</td>
+<td>JSON 규칙</td>
+<td><strong>정규화된 조건 테이블</strong></td>
+</tr>
+<tr>
+<td>처리 순서</td>
+<td>가입 조회 → 규칙 평가</td>
+<td><strong>설정(캐시) → 행 평가 → 가입 조회</strong></td>
+</tr>
+<tr>
+<td>소급</td>
+<td>가입 백필로 보정</td>
+<td><strong>소급 없음, 백필 제거</strong></td>
+</tr>
+<tr>
+<td>가입 판정</td>
+<td>유효구간(valid_from/to)</td>
+<td><strong>조회 시점 ACTIVE ∧ 이벤트일시 ≥ 가입일시</strong></td>
+</tr>
+<tr>
+<td>멱등키</td>
+<td>(프로모션, 소스, PK)</td>
+<td><strong>{디텍터}|{소스 비즈니스키}|{리워드그룹}</strong></td>
+</tr>
+<tr>
+<td>provider 연계</td>
+<td>미정</td>
+<td><strong>요청ID 공유, 수신내역으로 결과 추적</strong></td>
+</tr>
+</tbody>
+</table></div>
 </section>
 
-<!-- 07 -->
-<section class="card" id="ops" aria-labelledby="h-ops">
-  <h2 id="h-ops"><span class="num">07</span>다중 pod 운영</h2>
-  <div class="grid2">
-    <div class="tile"><div class="h">리더 없음</div><p>모든 pod가 Planner, Worker, Backfill Worker를 함께 돌립니다. 조율은 prm_db 행 잠금(<code>SKIP LOCKED</code>)과 리스로 합니다.</p></div>
-    <div class="tile"><div class="h">커넥션 풀 분리</div><p>rdt_db용과 prm_db용을 분리합니다. rdt_db 풀 크기가 곧 소스 읽기 동시성 상한입니다.</p></div>
-    <div class="tile"><div class="h">소스 간 공정성</div><p>워커는 소스를 라운드로빈으로 돌며 claim하고, 소스별 동시 claim 상한을 둡니다. 유입이 큰 소스가 작은 소스를 굶기지 않습니다.</p></div>
-    <div class="tile"><div class="h">스케일 아웃 신호</div><p>소스별 <code>안전 워터마크 − 처리 완료 워터마크</code>가 목표(예: 10초)를 넘으면 HPA로 pod를 늘립니다.</p></div>
-  </div>
+<section class="card" id="s08" aria-labelledby="h-s08">
+<h2 id="h-s08"><span class="num">08</span>확인 필요 사항</h2>
+<ol class="plain">
+<li>고객일별평잔에서 가입일시와 비교할 기준이 <strong>기준일자</strong>인지 <strong>적재일시</strong>인지 (디텍터기본.이벤트일시필드로 지정)</li>
+<li>같은 프로모션에서 행 하나가 리워드그룹 여러 개를 통과하면 모두 지급하는지, 하나만 지급하는지 (provider 정책)</li>
+<li>provider가 "첫 거래" 같은 순서 의존 규칙을 이벤트일시 기준으로 판단하는지</li>
+<li>가입 없이 전체 고객이 대상인 프로모션이 있는지 (있으면 프로모션에 대상구분 추가, 가입 조회 생략)</li>
+</ol>
 </section>
-
-<!-- 08 -->
-<section class="card" id="metrics" aria-labelledby="h-metrics">
-  <h2 id="h-metrics"><span class="num">08</span>모니터링 지표</h2>
-  <div class="table-wrap"><table>
-    <thead><tr><th>지표</th><th>의미 / 알람</th></tr></thead>
-    <tbody>
-      <tr><td class="mono">detect_lag_seconds{source}</td><td>안전 워터마크와 DONE 청크의 차이. SLA 초과 시 알람</td></tr>
-      <tr><td class="mono">cdc_lag_seconds</td><td>원천 now() − rdt_db heartbeat. CDC 장애 감지</td></tr>
-      <tr><td class="mono">chunk_hit_ratio{source}</td><td>가입자 적중 비율. 계속 매우 낮으면 전략 C 검토</td></tr>
-      <tr><td class="mono">member_lookup_ms p99</td><td>가입 조회 지연. 오르면 index-only scan 깨짐(vacuum) 의심</td></tr>
-      <tr><td class="mono">backfill_pending_count</td><td>가입 백필 적체 건수와 최고 age</td></tr>
-      <tr><td class="mono">backfill_recovered_rows</td><td>백필로 새로 발행된 건. 일반 가입에서는 0에 가까워야 함</td></tr>
-      <tr><td class="mono">chunk_dead_count</td><td>재시도 초과 청크. 즉시 알람</td></tr>
-    </tbody>
-  </table></div>
-</section>
-
-<!-- 09 -->
-<section class="card" id="open" aria-labelledby="h-open">
-  <h2 id="h-open"><span class="num">09</span>확인 필요 사항</h2>
-  <ul class="check">
-    <li><span>CDC 도구와 적용 순서 보장 여부(Debezium, DMS, OGG 등). 안전 워터마크 방식이 달라집니다.</span></li>
-    <li><span>rdt_db에 <code>(cust_no, created_at)</code> 인덱스 추가가 가능한가.</span></li>
-    <li><span>소급 가입(가입 전 이벤트 인정) 정책이 있는가. 있다면 최대 소급 기간은.</span></li>
-    <li><span>누적·한도 조건을 리워드 엔진이 처리하는가(이 설계는 그렇게 가정).</span></li>
-    <li><span>소스 테이블마다 고객번호 컬럼명·형식이 같은가.</span></li>
-    <li><span>소스별 유입량(TPS)과 가입자 비율. pod 수와 청크 크기 산정에 씁니다.</span></li>
-  </ul>
-</section>
-
-<footer>기반 문서: <code>docs/design/polling-design-v2.md</code>, <code>docs/polling-implementation-guide.html</code> · 원문: <code>docs/design/promotion-detector-design.md</code></footer>
-
+<footer>원문: <a href="https://github.com/pilsa/architecture/blob/master/docs/design/promotion-detector-design-v2.md"><code>docs/design/promotion-detector-design-v2.md</code></a> · 폴링 동작: <a href="polling-implementation-guide.html">범위 청크 + 리스 구현 가이드</a></footer>
 </main>
 </div>
 <script>
