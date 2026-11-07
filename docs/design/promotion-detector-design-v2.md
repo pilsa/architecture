@@ -1,6 +1,6 @@
 # 프로모션 디텍터 설계 v2 — 역할 분리 · 처리 흐름 · 테이블 모델링
 
-> 작성 2026-11-05. 이전 문서 `promotion-detector-design.md`(v1)를 대체한다.
+> 작성 2026-11-05 · 개정 2026-11-07(프로모션 고객 기본/상세 구조). 이전 문서 `promotion-detector-design.md`(v1)를 대체한다.
 > 디텍터의 폴링 조회 동작(청크 분할, 리스, 워터마크)은 이 문서 범위에서 제외하며 `polling-design-v2.md`를 따른다.
 
 ---
@@ -10,15 +10,15 @@
 | 구성요소 | 역할 |
 |---|---|
 | **rdt-db** | CDC로 복제된 읽기 전용 DB. 소스 테이블(예: 고객일별평잔, 입출금거래내역)이 있다. 프로모션 가입자와 미가입자의 데이터가 섞여 있다 |
-| **prm-db** | 프로모션, 리워드그룹, 리워드항목, 가입고객, 디텍터 설정, 멱등, 아웃박스 테이블. detector와 provider가 **같이 사용**한다 |
+| **prm-db** | 프로모션, 리워드그룹, 리워드항목, 프로모션 고객(기본/상세), 디텍터 설정, 멱등, 아웃박스 테이블. detector와 provider가 **같이 사용**한다 |
 | **promotion-detector** | 소스 테이블을 읽고, 리워드 대상 이벤트를 골라 아웃박스에 넣는다. rdt-db에 접근하는 **유일한** 애플리케이션 |
 | **promotion-provider** | 리워드 엔진. 아웃박스 메시지를 받아 누적·한도·산정·지급을 처리한다. rdt-db를 조회하지 않는다 |
 | **admin** | 관리자가 프로모션, 리워드그룹, 디텍터 설정을 입력한다 |
-| **가입 API** | 고객식별자 + 가입 프로모션을 받아 가입고객 테이블에 넣는다 |
+| **가입 API** | 고객식별자 + 가입 프로모션을 받아 프로모션 고객 기본/상세에 넣는다. 해지도 처리한다 |
 
 ```
 [admin] ──▶ 디텍터 설정 · 프로모션 · 리워드그룹 · 리워드항목 (prm-db)
-[가입 API] ──▶ 프로모션가입고객 (prm-db)
+[가입 API] ──▶ 프로모션고객기본 · 프로모션고객상세 (prm-db)
 
 rdt-db ──읽기──▶ [promotion-detector] ──▶ 디텍터멱등내역 ──▶ 디텍터아웃박스 ──relay──▶ [promotion-provider]
                      │  설정: 캐시                                                    │
@@ -80,7 +80,7 @@ rdt-db ──읽기──▶ [promotion-detector] ──▶ 디텍터멱등내�
 ```sql
 -- ③ 가입 조회 (후보만)
 SELECT CUST_NO, PRMT_ID, JOIN_DTM
-FROM PRMT_CUST
+FROM PRMT_CUST_DTL          -- PK (CUST_NO, PRMT_ID) index-only scan
 WHERE CUST_NO = ANY(:candidateCusts)
   AND PRMT_ID = ANY(:candidatePrmts)
   AND STTS_CD = 'ACTIVE';
@@ -146,8 +146,9 @@ IDMPT_KEY = {디텍터ID}|{소스 비즈니스키}|{리워드그룹ID}
 | 디텍터 설정 | 디텍터트리거(DTCT_TRGR) | 디텍터와 리워드그룹 연결 | admin | detector(캐시) |
 | 디텍터 설정 | 디텍터트리거조건(DTCT_TRGR_COND) | 트리거별 행 단위 조건 | admin | detector(캐시) |
 | 디텍터 설정 | 디텍터설정이력(DTCT_CFG_HIST) | 설정 변경 이력 | admin | 운영·감사 |
-| 고객 | 프로모션가입고객(PRMT_CUST) | 고객의 프로모션 가입 현재 상태 | 가입 API | detector(DB) |
-| 고객 | 프로모션가입고객이력(PRMT_CUST_HIST) | 가입·탈퇴 이력 | 가입 API | 운영·감사 |
+| 고객 | 프로모션고객기본(PRMT_CUST_BASE) | 프로모션 참여 고객 1명당 1행 | 가입 API | 가입 API · 운영 |
+| 고객 | 프로모션고객상세(PRMT_CUST_DTL) | 고객 × 프로모션별 가입과 상태 | 가입 API · 종료 배치 | detector(DB) |
+| 고객 | 프로모션고객상세이력(PRMT_CUST_DTL_HIST) | 상세 상태 변경 이력 | 가입 API · 종료 배치 | 운영·감사 |
 | 연계 | 디텍터멱등내역(DTCT_IDMPT_HIST) | 아웃박스 입력 전 중복 방지 | detector | detector |
 | 연계 | 디텍터아웃박스(DTCT_OUTBOX) | detector → provider 리워드 생성 요청 | detector | relay |
 | 연계 | 프로바이더수신내역(PRVD_RCV_HIST) | provider의 요청 수신·처리 결과 | provider | provider |
@@ -245,42 +246,118 @@ IDMPT_KEY = {디텍터ID}|{소스 비즈니스키}|{리워드그룹ID}
 
 ---
 
-### 5.3 고객
+### 5.3 고객 (기본 / 상세)
 
-#### 프로모션가입고객 (PRMT_CUST)
+#### 요구사항과 구조
 
-**역할**: 고객의 프로모션 가입 현재 상태다. 가입 API가 쓰고, 디텍터가 가입 필터로 조회한다.
-**키**: PK `(PRMT_ID, CUST_NO)` · UK `JOIN_REQ_ID` · **UK `(CUST_NO, PRMT_ID) INCLUDE (STTS_CD, JOIN_DTM)`** — 디텍터 조회용 커버링 인덱스
+| 요구사항 | 설계 반영 |
+|---|---|
+| 고객식별자는 고유하다 | 프로모션고객기본의 PK = 고객번호 |
+| 프로모션식별자는 고유하다 | 기존 프로모션 테이블의 PK = 프로모션ID. 상세가 FK로 참조 |
+| 고객이 복수의 프로모션에 가입한다 | 고객과 프로모션은 N:M. **상세 1행 = 고객 1명 × 프로모션 1개** |
+| 프로모션별 상태 관리 (활동, 해지, 종료) | 상태는 고객이 아니라 **상세(고객 × 프로모션)**에 둔다 |
+
+```
+프로모션(PRMT) 1 ──── N 프로모션고객상세(PRMT_CUST_DTL) N ──── 1 프로모션고객기본(PRMT_CUST_BASE)
+                              │
+                              └── 1:N 프로모션고객상세이력(PRMT_CUST_DTL_HIST)
+```
+
+#### 상태 정의와 전이
+
+| 상태 | 코드 | 의미 | 발생 주체 |
+|---|---|---|---|
+| 활동 | ACTIVE | 가입 중. 리워드 대상 | 가입 API |
+| 해지 | CANCEL | 고객이 스스로 탈퇴 | 해지 API (고객 요청) |
+| 종료 | END | 프로모션 종료로 참여가 끝남 | 종료 배치 |
+
+```
+          가입                해지(고객)
+  (없음) ───────▶ ACTIVE ───────────▶ CANCEL
+                    │   ◀───────────    │
+                    │      재가입        │
+                    │ 프로모션 종료       │ 프로모션 종료
+                    ▼                   ▼
+                   END (최종 상태)
+```
+
+- 해지 후 재가입은 같은 행을 다시 ACTIVE로 바꾸고 가입일시를 재가입 시각으로 갱신한다. 소급이 없으므로 해지 기간의 이벤트는 대상에서 빠진다.
+- END는 최종 상태다. 종료된 프로모션에는 다시 가입할 수 없다.
+- 디텍터 판정은 그대로다: `상태 = ACTIVE` ∧ `이벤트일시 ≥ 가입일시`
+
+#### 프로모션고객기본 (PRMT_CUST_BASE)
+
+**역할**: 프로모션에 한 번이라도 가입한 고객의 기본 정보다. 고객당 1행.
+**키**: PK `CUST_NO`
 
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
-| 프로모션ID (PRMT_ID) | VARCHAR(32) | 가입한 프로모션 |
 | 고객번호 (CUST_NO) | VARCHAR(20) | 고객식별자. 소스 테이블과 같은 형식 |
-| 상태코드 (STTS_CD) | VARCHAR(8) | ACTIVE 가입 / LEFT 탈퇴 |
-| 가입일시 (JOIN_DTM) | TIMESTAMPTZ | DB now(). 이 시각 이후 이벤트만 대상 (소급 없음) |
-| 탈퇴일시 (LEAVE_DTM) | TIMESTAMPTZ | 탈퇴 시각 |
+| 최초가입일시 (FRST_JOIN_DTM) | TIMESTAMPTZ | 처음으로 프로모션에 가입한 시각 |
+| 활동프로모션수 (ACTV_PRMT_CNT) | SMALLINT | 현재 ACTIVE 상태인 프로모션 수 |
+| 등록일시 (REG_DTM) | TIMESTAMPTZ | 행 생성 시각 |
+| 변경일시 (CHG_DTM) | TIMESTAMPTZ | 마지막 변경 시각 |
+
+기본 테이블을 따로 두는 이유:
+- **고객 단위 직렬화**: 같은 고객의 가입·해지 요청이 동시에 오면 기본 행을 `FOR UPDATE`로 잠가 순서대로 처리한다. 활동프로모션수가 어긋나지 않는다.
+- **고객 단위 조회**: "프로모션 참여 고객인가", "몇 개에 참여 중인가"를 상세 집계 없이 바로 답한다.
+- **확장 지점**: 고객 단위 속성(마케팅 동의, 등급 등)이 생기면 여기에 둔다. 고객 개인정보는 원천 시스템에 있으므로 복제하지 않는다.
+
+#### 프로모션고객상세 (PRMT_CUST_DTL)
+
+**역할**: 고객의 프로모션별 가입과 상태다. 고객 × 프로모션당 1행이며, **디텍터의 가입 필터가 조회하는 테이블**이다.
+**키**: PK `(CUST_NO, PRMT_ID) INCLUDE (STTS_CD, JOIN_DTM)` · FK `CUST_NO → PRMT_CUST_BASE`, `PRMT_ID → PRMT` · UK `JOIN_REQ_ID` · IX `(PRMT_ID, STTS_CD)`
+
+| 컬럼 | 타입 | 설명 |
+|---|---|---|
+| 고객번호 (CUST_NO) | VARCHAR(20) | 가입 고객 |
+| 프로모션ID (PRMT_ID) | VARCHAR(32) | 가입 프로모션 |
+| 상태코드 (STTS_CD) | VARCHAR(8) | ACTIVE 활동 / CANCEL 해지 / END 종료 |
+| 가입일시 (JOIN_DTM) | TIMESTAMPTZ | 최근 가입(재가입) 시각. DB now(). 이후 이벤트만 대상 |
+| 해지일시 (CNCL_DTM) | TIMESTAMPTZ | 고객 해지 시각. 재가입하면 NULL |
+| 종료일시 (END_DTM) | TIMESTAMPTZ | 프로모션 종료 처리 시각 |
+| 상태변경사유코드 (STTS_CHG_RSN_CD) | VARCHAR(16) | 고객요청, 프로모션종료, 관리자처리 등 |
 | 가입요청ID (JOIN_REQ_ID) | VARCHAR(64) | 가입 API 중복 요청 방지 |
-| 가입채널코드 (JOIN_CHNL_CD) | VARCHAR(16) | 가입 경로 |
+| 가입채널코드 (JOIN_CHNL_CD) | VARCHAR(16) | 앱, 웹, 영업점 등 |
+| 등록일시 (REG_DTM) | TIMESTAMPTZ | 최초 가입 시각 (재가입해도 유지) |
 | 변경일시 (CHG_DTM) | TIMESTAMPTZ | 마지막 변경 시각 |
 
 설계 포인트:
-- 디텍터는 항상 "이 고객들이 어떤 프로모션에 가입했나"를 묻는다. 그래서 `CUST_NO`가 앞에 오는 인덱스가 핵심이다. INCLUDE로 상태와 가입일시를 인덱스에 담아 테이블을 읽지 않는 index-only scan이 되게 한다.
-- 가입이 계속 들어오므로 autovacuum을 공격적으로 설정한다. visibility map이 최신이어야 index-only scan이 유지된다.
+- **PK를 `(고객번호, 프로모션ID)` 순서로 둔다.** 상세는 고객의 하위이므로 자연스럽고, 디텍터의 질문("이 고객들이 어떤 프로모션에 가입했나")과 같은 순서다. PK에 INCLUDE로 상태와 가입일시를 담아 PK 하나로 index-only scan이 된다. 별도 디텍터 인덱스가 필요 없어 가입 시 쓰기 비용도 줄어든다.
+- 프로모션별 가입자 목록은 보조 인덱스 `(PRMT_ID, STTS_CD)`가 맡는다.
+- 가입이 계속 들어오므로 autovacuum을 공격적으로 둔다. visibility map이 최신이어야 index-only scan이 유지된다.
 - 용량: 300만 명 × 평균 2~3개 = 600만~900만 행. 인덱스가 메모리에 올라가는 크기라 파티셔닝은 필요 없다.
 
-#### 프로모션가입고객이력 (PRMT_CUST_HIST)
+#### 프로모션고객상세이력 (PRMT_CUST_DTL_HIST)
 
-**역할**: 가입·탈퇴·재가입 이력이다. 감사와 분쟁 대응에 쓴다. 디텍터는 읽지 않는다.
-**키**: PK `HIST_ID` · IX `(CUST_NO, PRMT_ID)`
+**역할**: 상세의 상태가 바뀔 때마다 1행씩 남긴다. 감사, 분쟁 대응, "그 시점에 가입 상태였나" 확인에 쓴다. 디텍터는 읽지 않는다.
+**키**: PK `HIST_SEQ` · IX `(CUST_NO, PRMT_ID, REG_DTM)` · 등록월 기준 파티션
 
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
-| 이력ID (HIST_ID) | BIGSERIAL | 이력 식별자 |
-| 프로모션ID (PRMT_ID) | VARCHAR(32) | 대상 프로모션 |
+| 이력순번 (HIST_SEQ) | BIGSERIAL | 이력 식별자 |
 | 고객번호 (CUST_NO) | VARCHAR(20) | 대상 고객 |
-| 처리구분코드 (ACT_CD) | VARCHAR(8) | JOIN 가입 / LEAVE 탈퇴 / REJOIN 재가입 |
-| 요청ID (REQ_ID) | VARCHAR(64) | API 요청 식별자 |
-| 등록일시 (REG_DTM) | TIMESTAMPTZ | 처리 시각 |
+| 프로모션ID (PRMT_ID) | VARCHAR(32) | 대상 프로모션 |
+| 변경전상태코드 (BF_STTS_CD) | VARCHAR(8) | 변경 전 상태. 최초 가입이면 NULL |
+| 변경후상태코드 (AF_STTS_CD) | VARCHAR(8) | 변경 후 상태 |
+| 상태변경사유코드 (STTS_CHG_RSN_CD) | VARCHAR(16) | 변경 사유 |
+| 요청ID (REQ_ID) | VARCHAR(64) | 가입·해지 API 요청 식별자. 배치는 배치 실행 ID |
+| 처리자ID (PRCS_ID) | VARCHAR(64) | 고객, 배치, 관리자 구분 |
+| 등록일시 (REG_DTM) | TIMESTAMPTZ | 변경 시각 |
+
+#### 처리 흐름 (각각 단일 트랜잭션)
+
+| 처리 | 기본 | 상세 | 이력 |
+|---|---|---|---|
+| 최초 가입 | INSERT 후 `FOR UPDATE`, 활동프로모션수 +1 | INSERT ACTIVE | NULL → ACTIVE |
+| 추가 프로모션 가입 | `FOR UPDATE`, 활동프로모션수 +1 | INSERT ACTIVE | NULL → ACTIVE |
+| 해지 | `FOR UPDATE`, 활동프로모션수 −1 | ACTIVE → CANCEL, 해지일시 설정 | ACTIVE → CANCEL |
+| 재가입 | `FOR UPDATE`, 활동프로모션수 +1 | CANCEL → ACTIVE, 가입일시 갱신, 해지일시 NULL | CANCEL → ACTIVE |
+| 프로모션 종료 | 활동프로모션수 −1 (ACTIVE였던 건만) | ACTIVE·CANCEL → END | → END |
+
+- 상태 전이 위반(END → ACTIVE, 이미 ACTIVE인데 가입 등)은 `UPDATE … WHERE STTS_CD = :기대상태`의 반영 건수가 0인지로 거부한다.
+- 가입 API의 중복 요청은 `JOIN_REQ_ID` 유니크 제약으로 막는다.
+- **프로모션 종료 배치**: 가입자가 수백만 명이면 일괄 UPDATE가 무겁다. 1만 건 단위로 나눠 커밋하고 한가한 시간대에 돌린다. 배치가 늦어도 정확성에는 영향이 없다. 디텍터는 프로모션 기간(설정 캐시)으로 종료일 이후 이벤트를 이미 거르기 때문이다. 상세의 END는 업무 조회와 정합성용 상태다.
 
 ---
 
@@ -370,6 +447,7 @@ IDMPT_KEY = {디텍터ID}|{소스 비즈니스키}|{리워드그룹ID}
 | 가입 판정 | 유효구간(valid_from/to) | **조회 시점 ACTIVE ∧ 이벤트일시 ≥ 가입일시** |
 | 멱등키 | (프로모션, 소스, PK) | **{디텍터}\|{소스 비즈니스키}\|{리워드그룹}** |
 | provider 연계 | 미정 | **요청ID 공유, 수신내역으로 결과 추적** |
+| 가입고객 구조 | 단일 테이블, 상태 ACTIVE/LEFT | **기본/상세/상세이력, 상태 ACTIVE/CANCEL/END, PK (고객번호, 프로모션ID)** |
 
 ---
 
@@ -379,3 +457,6 @@ IDMPT_KEY = {디텍터ID}|{소스 비즈니스키}|{리워드그룹ID}
 2. 같은 프로모션에서 행 하나가 리워드그룹 여러 개를 통과하면 모두 지급하는지, 하나만 지급하는지 (provider 정책)
 3. provider가 "첫 거래" 같은 순서 의존 규칙을 이벤트일시 기준으로 판단하는지
 4. 가입 없이 전체 고객이 대상인 프로모션이 있는지 (있으면 프로모션에 대상구분 추가, 가입 조회 생략)
+5. 해지 후 재가입 허용 여부 (불허하면 CANCEL도 최종 상태, 재가입 흐름 제거)
+6. 관리자 강제 제외(부정 참여 등)를 해지 + 사유코드로 둘지, 별도 상태(정지)로 둘지
+7. 프로모션고객기본에 둘 고객 단위 속성(마케팅 동의, 등급 등)이 있는지
